@@ -40,6 +40,8 @@ pub struct GrepOptions {
     pub count: bool,
     /// パスだけを出す。
     pub files: bool,
+    /// 当たったページをすべて、1 ページ 1 行（題名・行数・いちばん上の当たり行の抜粋）で出す。
+    pub pages: bool,
     /// 1 ページに出す当たった行の数（0 は無制限）。
     pub max_per_page: usize,
     /// 行を出すページの数（0 は無制限）。残りはパスと行数だけを出す。
@@ -48,6 +50,8 @@ pub struct GrepOptions {
     pub context: usize,
     /// 1 行に出す文字数（0 は無制限）。超えた分は省く。
     pub max_columns: usize,
+    /// 行の部分全体の文字数の目安（0 は無制限）。超えたら残りのページは一覧に回す。
+    pub max_chars: usize,
 }
 
 impl GrepOptions {
@@ -56,7 +60,10 @@ impl GrepOptions {
     /// 行を出すページの数の既定値。
     pub const MAX_PAGES: usize = 30;
     /// 1 行の文字数の既定値。
-    pub const MAX_COLUMNS: usize = 500;
+    pub const MAX_COLUMNS: usize = 300;
+    /// 全体の文字数の既定値。Claude Code は長い出力をファイルに逃がし、読むのに手間が増えるので、
+    /// それより十分小さくする。
+    pub const MAX_CHARS: usize = 10_000;
 }
 
 impl Default for GrepOptions {
@@ -66,10 +73,12 @@ impl Default for GrepOptions {
             all: false,
             count: false,
             files: false,
+            pages: false,
             max_per_page: Self::MAX_PER_PAGE,
             max_pages: Self::MAX_PAGES,
             context: 0,
             max_columns: Self::MAX_COLUMNS,
+            max_chars: Self::MAX_CHARS,
         }
     }
 }
@@ -192,6 +201,8 @@ fn grep(terms: &[String], o: &GrepOptions, cx: &Context<'_>, out: &mut impl Writ
         for f in &r.files {
             let _ = writeln!(out, "{}:{}", f.rel, f.hits.len());
         }
+    } else if o.pages {
+        print_pages(&r, o, n_terms, out);
     } else {
         print_lines(&r, o, n_terms, out);
     }
@@ -199,6 +210,9 @@ fn grep(terms: &[String], o: &GrepOptions, cx: &Context<'_>, out: &mut impl Writ
 }
 
 /// ページの見出し行と当たった行（と前後の行）を出す。上限を超えた分は一覧にする。
+///
+/// 上限は 1 ページの行数・ページ数・全体の文字数の 3 つ。全体の文字数に達したら、
+/// それ以降のページはパスと行数の一覧に回す（1 ページ目は少なくとも 1 行出す）。
 fn print_lines(
     r: &search::SearchResult<'_>,
     o: &GrepOptions,
@@ -206,46 +220,38 @@ fn print_lines(
     out: &mut impl Write,
 ) {
     let limit = |n: usize| if n == 0 { usize::MAX } else { n };
-    let shown_pages = r.files.len().min(limit(o.max_pages));
+    let max_pages = limit(o.max_pages);
     let per_page = limit(o.max_per_page);
-    let omitted_lines: usize = r.files[..shown_pages]
-        .iter()
-        .map(|f| f.hits.len().saturating_sub(per_page))
-        .sum();
-    let rest = &r.files[shown_pages..];
-    if omitted_lines > 0 || !rest.is_empty() {
-        let _ = writeln!(
-            out,
-            "# 表示: 上位 {shown_pages} ページ・各 {} 行まで（省いた行 {omitted_lines}、行を出さないページ {}）。順位は 当たった語の種類 → 題名 → 見出し → 行数。すべて出すには --full",
-            o.max_per_page,
-            rest.len()
-        );
-    }
+    let budget = limit(o.max_chars);
 
-    for f in &r.files[..shown_pages] {
-        let mut head = format!("# ページ: {}", f.rel);
-        let title = f.page.title();
-        if !title.is_empty() {
-            head.push_str(&format!("「{title}」"));
+    let mut body = String::new();
+    let mut used = 0usize;
+    let mut shown_pages = 0usize;
+    let mut omitted_lines = 0usize;
+    for f in r.files.iter().take(max_pages) {
+        if shown_pages > 0 && used >= budget {
+            break;
         }
-        head.push_str(&format!(" {} 行", f.hits.len()));
-        if n_terms > 1 {
-            head.push_str(&format!("・語 {}/{n_terms}", f.terms.count_ones()));
-        }
-        if f.title_terms != 0 {
-            head.push_str("・題名に当たり");
-        }
-        let _ = writeln!(out, "{head}");
-
-        let shown = &f.hits[..f.hits.len().min(per_page)];
-        if o.context == 0 {
-            for h in shown {
-                let _ = writeln!(out, "{}:{}:{}", f.rel, h.line, clip(h.text, o.max_columns));
-            }
+        let room = budget.saturating_sub(used);
+        let most = f.hits.len().min(per_page);
+        // 残りの文字数に収まる行数を探す（多いほど長いので二分探索）
+        let fits = |k: usize| page_block(f, &f.hits[..k], o, n_terms).chars().count() <= room;
+        let k = if fits(most) {
+            most
         } else {
-            print_with_context(f, shown, o, out);
+            let (mut lo, mut hi) = (0usize, most);
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                if fits(mid) { lo = mid } else { hi = mid - 1 }
+            }
+            lo
+        };
+        let k = if shown_pages == 0 { k.max(1) } else { k };
+        if k == 0 {
+            break;
         }
-        let hidden = &f.hits[shown.len()..];
+        let mut block = page_block(f, &f.hits[..k], o, n_terms);
+        let hidden = &f.hits[k..];
         if !hidden.is_empty() {
             const LIST: usize = 20;
             let nums: Vec<String> = hidden
@@ -258,14 +264,37 @@ fn print_lines(
             } else {
                 String::new()
             };
-            let _ = writeln!(
-                out,
-                "# （このページのほかの {} 行: {}{more}）",
+            block.push_str(&format!(
+                "# （このページのほかの {} 行: {}{more}）\n",
                 hidden.len(),
                 nums.join(", ")
-            );
+            ));
         }
+        used += block.chars().count();
+        body.push_str(&block);
+        shown_pages += 1;
+        omitted_lines += hidden.len();
     }
+
+    let rest = &r.files[shown_pages..];
+    if omitted_lines > 0 || !rest.is_empty() {
+        let _ = writeln!(
+            out,
+            "# 表示: 上位 {shown_pages} ページ（1 ページ {} 行・全体 {} 文字まで。省いた行 {omitted_lines}、行を出さないページ {}）。順位は 当たった語の種類 → 題名 → 見出し → 行数。続きは行番号で Read する。当たったページをすべて 1 行ずつ見るには --pages",
+            if o.max_per_page == 0 {
+                "無制限".to_string()
+            } else {
+                o.max_per_page.to_string()
+            },
+            if o.max_chars == 0 {
+                "無制限".to_string()
+            } else {
+                o.max_chars.to_string()
+            },
+            rest.len()
+        );
+    }
+    let _ = out.write_all(body.as_bytes());
 
     if !rest.is_empty() {
         const LIST: usize = 50;
@@ -285,6 +314,97 @@ fn print_lines(
             items.join(", ")
         );
     }
+}
+
+/// 抜粋の文字数。
+const SNIPPET: usize = 120;
+
+/// 当たったページをすべて 1 ページ 1 行で出す: `パス「題名」 N 行[・語 a/b]: 行番号: 抜粋`。
+/// 全体の文字数の目安を超えたら、残りは抜粋なしの `パス (行数)` の一覧にする（ページは落とさない）。
+fn print_pages(
+    r: &search::SearchResult<'_>,
+    o: &GrepOptions,
+    n_terms: usize,
+    out: &mut impl Write,
+) {
+    let budget = if o.max_chars == 0 {
+        usize::MAX
+    } else {
+        o.max_chars
+    };
+    let mut used = 0usize;
+    let mut rest = Vec::new();
+    for f in &r.files {
+        if used >= budget {
+            rest.push(format!("{} ({})", f.rel, f.hits.len()));
+            continue;
+        }
+        let mut line = f.rel.to_string();
+        let title = f.page.title();
+        if !title.is_empty() {
+            line.push_str(&format!("「{title}」"));
+        }
+        line.push_str(&format!(" {} 行", f.hits.len()));
+        if n_terms > 1 {
+            line.push_str(&format!("・語 {}/{n_terms}", f.terms.count_ones()));
+        }
+        if let Some(h) = f.hits.first() {
+            line.push_str(&format!(
+                ": {}: {}",
+                h.line,
+                snippet(h.text.trim(), SNIPPET)
+            ));
+        }
+        used += line.chars().count() + 1;
+        let _ = writeln!(out, "{line}");
+    }
+    if !rest.is_empty() {
+        let _ = writeln!(
+            out,
+            "# 残りのページ（抜粋なし・順位順・行数）: {}",
+            rest.join(", ")
+        );
+    }
+}
+
+/// 短い抜粋（`max` 文字で切って … を付ける）。
+fn snippet(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    match s.char_indices().nth(max) {
+        None => std::borrow::Cow::Borrowed(s),
+        Some((cut, _)) => std::borrow::Cow::Owned(format!("{}…", &s[..cut])),
+    }
+}
+
+/// 1 ページぶんの見出し行と、`shown` の行（と前後の行）。
+fn page_block(
+    f: &search::FileHits<'_>,
+    shown: &[search::LineHit<'_>],
+    o: &GrepOptions,
+    n_terms: usize,
+) -> String {
+    let mut s = format!("# ページ: {}", f.rel);
+    let title = f.page.title();
+    if !title.is_empty() {
+        s.push_str(&format!("「{title}」"));
+    }
+    s.push_str(&format!(" {} 行", f.hits.len()));
+    if n_terms > 1 {
+        s.push_str(&format!("・語 {}/{n_terms}", f.terms.count_ones()));
+    }
+    if f.title_terms != 0 {
+        s.push_str("・題名に当たり");
+    }
+    s.push('\n');
+    let mut buf = Vec::new();
+    if o.context == 0 {
+        for h in shown {
+            let _ = writeln!(buf, "{}:{}:{}", f.rel, h.line, clip(h.text, o.max_columns));
+        }
+    } else {
+        print_with_context(f, shown, o, &mut buf);
+    }
+    s.push_str(&String::from_utf8_lossy(&buf));
+    s
 }
 
 /// 当たった行に前後の行を付けて出す。当たった行は `パス:行:内容`、前後の行は `パス-行-内容`、

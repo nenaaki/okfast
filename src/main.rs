@@ -51,8 +51,11 @@ enum Command {
         #[arg(short, long, conflicts_with = "files")]
         count: bool,
         /// 当たったページのパスだけを出す（順位順）。
-        #[arg(short = 'l', long)]
+        #[arg(short = 'l', long, conflicts_with = "pages")]
         files: bool,
+        /// 当たったページをすべて、1 ページ 1 行（題名・行数・いちばん上の当たり行の抜粋）で出す。
+        #[arg(long, conflicts_with = "count")]
+        pages: bool,
         /// 1 ページに出す当たった行の数（0 は無制限）。
         #[arg(short = 'm', long, default_value_t = command::GrepOptions::MAX_PER_PAGE)]
         max_per_page: usize,
@@ -65,7 +68,10 @@ enum Command {
         /// 1 行に出す文字数（0 は無制限）。
         #[arg(long, default_value_t = command::GrepOptions::MAX_COLUMNS)]
         max_columns: usize,
-        /// 上限なしですべて出す（-m 0 --max-pages 0 --max-columns 0 と同じ）。
+        /// 行の部分全体の文字数の目安（0 は無制限）。超えたら残りのページはパスと行数の一覧になる。
+        #[arg(long, default_value_t = command::GrepOptions::MAX_CHARS)]
+        max_chars: usize,
+        /// 上限なしですべて出す（-m 0 --max-pages 0 --max-columns 0 --max-chars 0 と同じ）。
         #[arg(long)]
         full: bool,
     },
@@ -222,10 +228,12 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
             all,
             count,
             files,
+            pages,
             max_per_page,
             max_pages,
             context,
             max_columns,
+            max_chars,
             full,
         } => command::Command::Grep {
             terms: terms.clone(),
@@ -234,10 +242,12 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
                 all: *all,
                 count: *count,
                 files: *files,
+                pages: *pages,
                 max_per_page: if *full { 0 } else { *max_per_page },
                 max_pages: if *full { 0 } else { *max_pages },
                 context: *context,
                 max_columns: if *full { 0 } else { *max_columns },
+                max_chars: if *full { 0 } else { *max_chars },
             },
         },
     };

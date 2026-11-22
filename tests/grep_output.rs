@@ -159,3 +159,99 @@ fn context_lines_and_clipping() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&root2);
 }
+
+#[test]
+fn total_budget_moves_the_rest_to_the_list() {
+    let line = format!("alpha {}\n", "x".repeat(90));
+    let pages: Vec<(String, String)> = (0..10)
+        .map(|i| (format!("p{i}.md"), page(&format!("P{i}"), &line.repeat(3))))
+        .collect();
+    let refs: Vec<(&str, &str)> = pages
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let root = bundle_dir("budget", &refs);
+    let opts = GrepOptions {
+        max_chars: 700,
+        ..GrepOptions::default()
+    };
+    let (_, out) = grep(&root, &["alpha"], opts);
+    let shown = out.lines().filter(|l| l.starts_with("# ページ: ")).count();
+    assert!((1..10).contains(&shown), "{out}");
+    let body: usize = out
+        .lines()
+        .filter(|l| {
+            !l.starts_with("# grep")
+                && !l.starts_with("# 当たり")
+                && !l.starts_with("# 表示")
+                && !l.starts_with("# ほかに")
+        })
+        .map(|l| l.chars().count() + 1)
+        .sum();
+    assert!(body <= 700, "{body}\n{out}");
+    assert!(
+        out.contains("# ほかに当たったページ（順位順・行数）: "),
+        "{out}"
+    );
+
+    // 1 ページ目は、上限より長くても少なくとも 1 行出す
+    let tiny = GrepOptions {
+        max_chars: 10,
+        ..GrepOptions::default()
+    };
+    let (_, out) = grep(&root, &["alpha"], tiny);
+    assert_eq!(
+        out.lines().filter(|l| l.starts_with("p0.md:")).count(),
+        1,
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn pages_mode_lists_every_page_in_one_line() {
+    let pages: Vec<(String, String)> = (0..40)
+        .map(|i| {
+            (
+                format!("p{i:02}.md"),
+                page(
+                    &format!("P{i}"),
+                    &format!("intro\nalpha {}\nalpha\n", "y".repeat(200)),
+                ),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = pages
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let root = bundle_dir("pages", &refs);
+    let opts = GrepOptions {
+        pages: true,
+        ..GrepOptions::default()
+    };
+    let (_, out) = grep(&root, &["alpha"], opts);
+    let lines: Vec<&str> = out.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(lines.len(), 40, "{out}");
+    assert!(
+        lines[0].starts_with("p00.md「P0」 2 行: 6: alpha yyy"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].ends_with('…'), "{}", lines[0]);
+
+    // 文字数の目安を超えたら、残りは抜粋なしの一覧（ページは落とさない）
+    let small = GrepOptions {
+        pages: true,
+        max_chars: 500,
+        ..GrepOptions::default()
+    };
+    let (_, out) = grep(&root, &["alpha"], small);
+    let shown = out.lines().filter(|l| !l.starts_with('#')).count();
+    let rest = out
+        .lines()
+        .find_map(|l| l.strip_prefix("# 残りのページ（抜粋なし・順位順・行数）: "))
+        .unwrap();
+    assert_eq!(shown + rest.split(", ").count(), 40, "{out}");
+    let _ = std::fs::remove_dir_all(&root);
+}

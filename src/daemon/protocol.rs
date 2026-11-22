@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// 形式の版。変えたら上げる。
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 4;
 const MAGIC_REQ: &[u8; 4] = b"OKFQ";
 const MAGIC_RES: &[u8; 4] = b"OKFR";
 /// 1 フレームの上限（壊れた入力で大きなメモリを取らないため）。
@@ -191,7 +191,13 @@ impl Request {
                     Command::Grep { terms, opts } => {
                         e.u8(0);
                         e.strs(terms);
-                        for b in [opts.no_aliases, opts.all, opts.count, opts.files] {
+                        for b in [
+                            opts.no_aliases,
+                            opts.all,
+                            opts.count,
+                            opts.files,
+                            opts.pages,
+                        ] {
                             e.u8(u8::from(b));
                         }
                         for n in [
@@ -199,6 +205,7 @@ impl Request {
                             opts.max_pages,
                             opts.context,
                             opts.max_columns,
+                            opts.max_chars,
                         ] {
                             e.u32(u32::try_from(n).unwrap_or(u32::MAX));
                         }
@@ -238,10 +245,12 @@ impl Request {
                             all: d.bool()?,
                             count: d.bool()?,
                             files: d.bool()?,
+                            pages: d.bool()?,
                             max_per_page: d.u32()? as usize,
                             max_pages: d.u32()? as usize,
                             context: d.u32()? as usize,
                             max_columns: d.u32()? as usize,
+                            max_chars: d.u32()? as usize,
                         },
                     },
                     1 => Command::Aliases {
