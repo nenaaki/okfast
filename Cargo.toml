@@ -1,0 +1,63 @@
+[package]
+name = "okfast"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "The fastest toolkit for OKF 0.2"
+license = "MIT"
+repository = "https://github.com/nenaaki/okfast"
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "okfast"
+path = "src/main.rs"
+
+[dependencies]
+aho-corasick = "1.1.5"
+clap = { version = "4.6.9", features = ["derive"] }
+globset = "0.4.19"
+memchr = "2.8.3"
+notify = "8.2.1"
+rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.2"
+unicode-normalization = "0.1.26"
+yaml-rust2 = "0.13.2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "parse"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+
+# 計測用: release と同じ最適化 + シンボル付き（プロファイラ向け）
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+perf = { level = "deny", priority = -1 }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization", "Win32_System_IO", "Win32_System_Console", "Win32_System_Threading"] }

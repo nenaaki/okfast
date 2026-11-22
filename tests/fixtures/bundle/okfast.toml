@@ -1,0 +1,18 @@
+[[aliases.table]]
+pages   = { type = "Glossary Table" }
+concept = "Concept"
+names   = "Names"
+boost   = "Topic"
+[[aliases.table.conditional]]
+column = "Misheard"
+when   = { path = "references/transcripts/**" }
+
+[[aliases.frontmatter]]
+keys = ["aliases"]
+
+[aliases.trust]
+key   = "credibility"
+allow = ["A", "B"]
+
+[search]
+exclude = ["glossary/**"]
