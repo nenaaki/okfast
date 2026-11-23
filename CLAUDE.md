@@ -26,7 +26,7 @@ cargo build --profile profiling   # release 最適化 + デバッグシンボル
 作業完了前に必ず `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test` を通すこと。
 
 - CI（`.github/workflows/ci.yml`）は Windows と Linux で fmt・clippy・test、加えて Rust 1.85（`rust-version`）での check を回す。依存を足したら `cargo +1.85 check --all-targets` で確かめる（`rustup toolchain install 1.85-x86_64-pc-windows-gnu --profile minimal`）
-- リリースは `v<版>` のタグを push すると `.github/workflows/release.yml` が作る（Windows は MSVC、Linux は musl の静的リンク）。タグの前に `Cargo.toml` の `version` を上げる
+- リリースは `v<版>` のタグを push すると `.github/workflows/release.yml` が作る（Windows は MSVC、Linux は musl の静的リンク）。タグの前に `Cargo.toml` の `version` を上げる。ワークフローを変えたら、Actions から Release を手動で実行して（`gh workflow run release.yml --ref <ブランチ>`）、公開の手前まで通るかを確かめる
 
 ## 構成と検証
 
