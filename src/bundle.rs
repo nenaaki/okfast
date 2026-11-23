@@ -3,10 +3,11 @@
 use crate::cache::{self, Stamp};
 use crate::error::{Error, Result};
 use crate::frontmatter::{self, Frontmatter};
+use crate::sections::Outline;
 use crate::textindex::TextIndex;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// OKF 0.2 §3.1 の予約名（概念ではない）。
 pub const RESERVED: [&str; 2] = ["index.md", "log.md"];
@@ -24,12 +25,41 @@ pub struct Page {
     body_line: usize,
     parsed: OnceLock<(Frontmatter, Option<String>)>,
     index: OnceLock<TextIndex>,
+    outline: OnceLock<Outline>,
+    /// 行の日付（日付の取り方の鍵, 各行の日付）。取り方が変わったら作り直す。
+    dates: Mutex<Option<(u64, crate::dates::LineDates)>>,
 }
 
 impl Page {
     /// 検索用に正規化した本文（初めて参照したときに作る）。
     pub fn text_index(&self) -> &TextIndex {
         self.index.get_or_init(|| TextIndex::build(self.body()))
+    }
+
+    /// 見出しと節（初めて参照したときに作る）。
+    pub fn outline(&self) -> &Outline {
+        self.outline
+            .get_or_init(|| Outline::build(self.body(), self.text_index()))
+    }
+
+    /// 行の日付を、取り方の鍵 `key` が同じなら使い回し、違えば `make` で作って覚える。
+    pub fn cached_dates(
+        &self,
+        key: u64,
+        make: impl FnOnce() -> Vec<Option<crate::dates::Date>>,
+    ) -> crate::dates::LineDates {
+        if let Ok(g) = self.dates.lock() {
+            if let Some((k, d)) = g.as_ref() {
+                if *k == key {
+                    return Arc::clone(d);
+                }
+            }
+        }
+        let d: crate::dates::LineDates = make().into();
+        if let Ok(mut g) = self.dates.lock() {
+            *g = Some((key, Arc::clone(&d)));
+        }
+        d
     }
 
     /// 本文（frontmatter を除く）。
@@ -101,6 +131,8 @@ impl Page {
             body_line,
             parsed: OnceLock::new(),
             index: OnceLock::new(),
+            outline: OnceLock::new(),
+            dates: Mutex::new(None),
         }
     }
 }

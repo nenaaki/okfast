@@ -10,6 +10,7 @@
 //! - セルの中の区切り、括弧の注記の有無
 
 use crate::bundle::Bundle;
+use crate::dates;
 use crate::markdown;
 use crate::normalize::fold;
 use std::collections::BTreeMap;
@@ -373,6 +374,7 @@ pub fn draft(bundle: &Bundle) -> String {
         );
     }
     let _ = writeln!(o, "exclude = {}", toml_list(&dict_pages));
+    write_search_ranges(&mut o, bundle);
     o
 }
 
@@ -516,6 +518,133 @@ fn write_table(o: &mut String, cols: &Columns, f: &Found, transcript_dirs: &[Str
         }
     }
     let _ = writeln!(o);
+}
+
+/// `okfast search` の設定の下書き。日付の書き方はバンドルを走査して、見つかったものだけを提案する。
+fn write_search_ranges(o: &mut String, bundle: &Bundle) {
+    let mut table_rows = (0usize, None::<String>);
+    let mut fm: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut footnotes = (0usize, None::<String>);
+    let mut headings = (0usize, None::<String>);
+    let note = |slot: &mut (usize, Option<String>), at: String| {
+        slot.0 += 1;
+        slot.1.get_or_insert(at);
+    };
+    for p in &bundle.pages {
+        let first = p.body_line();
+        for t in markdown::tables(p.body_lines()) {
+            for r in &t.rows {
+                if r.cells
+                    .first()
+                    .is_some_and(|c| dates::newest_in(c).is_some())
+                {
+                    note(&mut table_rows, format!("{}:{}", p.rel, r.line));
+                }
+            }
+        }
+        for k in p.frontmatter().keys() {
+            if p.frontmatter()
+                .string(k)
+                .is_some_and(|v| dates::parse_exact(&v).is_some())
+            {
+                let e = fm.entry(k.to_string()).or_insert((0, p.rel.clone()));
+                e.0 += 1;
+            }
+        }
+        for (i, line) in p.body().lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("[^") && t.contains("]:") && dates::newest_in(t).is_some() {
+                note(&mut footnotes, format!("{}:{}", p.rel, first + i));
+            }
+        }
+        for h in &p.outline().headings {
+            if dates::newest_in(&h.text).is_some() {
+                note(&mut headings, format!("{}:{}", p.rel, first + h.line));
+            }
+        }
+    }
+
+    let _ = writeln!(o);
+    let _ = writeln!(
+        o,
+        "# okfast search（読む範囲を返す検索）の設定。既定値のままでよければ書かなくてよい"
+    );
+    let _ = writeln!(o, "# [search.sections]");
+    let _ = writeln!(
+        o,
+        "# max_lines = 40   # これより長い節は、当たった行の前後だけを範囲にする"
+    );
+    let _ = writeln!(o, "# window    = 4    # その前後の行数");
+    let _ = writeln!(o);
+
+    let mut sources: Vec<String> = Vec::new();
+    let mut evidence: Vec<String> = Vec::new();
+    if table_rows.0 > 0 {
+        sources.push("table_row".into());
+        evidence.push(format!(
+            "表の 1 列目が日付の行 {}（例: {}）",
+            table_rows.0,
+            table_rows.1.unwrap_or_default()
+        ));
+    }
+    for (k, (n, example)) in &fm {
+        sources.push(format!("frontmatter:{k}"));
+        evidence.push(format!(
+            "frontmatter の {k} が日付のページ {n}（例: {example}）"
+        ));
+    }
+    if footnotes.0 > 0 {
+        sources.push("footnote_source".into());
+        evidence.push(format!(
+            "日付を含む脚注の定義 {}（例: {}）",
+            footnotes.0,
+            footnotes.1.unwrap_or_default()
+        ));
+    }
+    if headings.0 > 0 {
+        sources.push("heading".into());
+        evidence.push(format!(
+            "日付を含む見出し {}（例: {}）",
+            headings.0,
+            headings.1.unwrap_or_default()
+        ));
+    }
+    let _ = writeln!(
+        o,
+        "# 行の日付の取り方。新しい記録を足す・--since・--sort date に使う。先に書いたものから探す"
+    );
+    if sources.is_empty() {
+        let _ = writeln!(
+            o,
+            "# 日付（YYYY-MM-DD・YYYY/MM/DD）の書かれた表・frontmatter・脚注・見出しは見つからなかった"
+        );
+        let _ = writeln!(o, "# [search.recent]");
+        let _ = writeln!(
+            o,
+            "# date_sources = [\"table_row\", \"frontmatter:<キー>\", \"footnote_source\", \"heading\"]"
+        );
+    } else {
+        for e in &evidence {
+            let _ = writeln!(o, "# 根拠: {e}");
+        }
+        if !fm.is_empty() {
+            let _ = writeln!(
+                o,
+                "# frontmatter のキーはページのすべての行に効く。更新日などのキーなら外す"
+            );
+        }
+        let _ = writeln!(o, "[search.recent]");
+        let _ = writeln!(o, "count        = 4");
+        let _ = writeln!(o, "date_sources = {}", toml_list(&sources));
+    }
+    let _ = writeln!(o);
+    let _ = writeln!(
+        o,
+        "# 関連度によらず必ず出す範囲（主題のページの、見出しに語を含む節と、決まったページの上位）"
+    );
+    let _ = writeln!(o, "# [search.must_read]");
+    let _ = writeln!(o, "# headings = [\"<見出しの語>\"]");
+    let _ = writeln!(o, "# pages    = [{{ path = \"<glob>\", top = 3 }}]");
 }
 
 #[cfg(test)]

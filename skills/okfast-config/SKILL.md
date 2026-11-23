@@ -1,6 +1,6 @@
 ---
 name: okfast-config
-description: OKF バンドルに okfast.toml（okfast の同義語の設定）を作る・直す。okfast grep の言い換えが効かない、辞書を足した・列名を変えた、新しいバンドルで okfast を使い始める、といったときに使う。
+description: OKF バンドルに okfast.toml（okfast の同義語と search の設定）を作る・直す。okfast grep の言い換えが効かない、辞書を足した・列名を変えた、新しいバンドルで okfast を使い始める、といったときに使う。
 ---
 
 # okfast.toml を作る・直す
@@ -18,6 +18,11 @@ okfast は OKF バンドルを、同義語で言い換えながら検索する�
    - **終了コードが 0（設定の警告なし）になるまで** 直しては check を繰り返す。2 は設定ファイルの文法の誤り（行と列が示される）
    - `?` の行は辞書の中身についての所見（同じ語が複数の行にある、長すぎる呼び名、リンク切れ）。設定では直さず、一覧にして利用者に伝える。辞書のページを直すかは利用者が決める。括弧の注記で長くなっているだけなら `strip_notes` で外してよい
 4. 代表的な語で言い換えを確かめる: `okfast -b <root> aliases <語>`（出所のページと行が出る）
+5. `okfast search`（読む範囲を返す検索）を使うなら、`[search.recent]`・`[search.must_read]`・`[search] show_keys` も書く
+   - 行の日付の取り方（`date_sources`）は、init が「根拠」つきで提案したものだけを使う。日付の書かれていない取り出し元を足さない。frontmatter のキーはページの全行に効くので、更新日のように記録の日付でないキーなら外す
+   - 必ず読む節の見出しの語（`must_read.headings`）や決まったページ（`must_read.pages`）は、バンドルの書き方を推測せず、利用者に確かめてから書く
+   - check の `[search.recent]` の節で日付の取れた行の数と例を見て、意図どおりかを確かめる
+   - 代表的な語で `okfast -b <root> search <語>` を実行し、範囲の［日付｜§見出し］が意図どおりかを見る
 
 ## 守ること
 

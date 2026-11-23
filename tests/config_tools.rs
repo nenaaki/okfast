@@ -237,9 +237,79 @@ fn reference_documents_every_key() {
         "`key`",
         "`allow`",
         "`exclude`",
+        "`show_keys`",
+        "[search.sections]",
+        "[search.recent]",
+        "[search.must_read]",
+        "`max_lines`",
+        "`window`",
+        "`min_chars`",
+        "`count`",
+        "`date_sources`",
+        "`table_columns`",
+        "`table_row`",
+        "`footnote_source`",
+        "`heading`",
+        "frontmatter:<キー>",
+        "`topics`",
+        "`headings`",
+        "`top`",
         "config check",
         "config init",
     ] {
         assert!(REFERENCE.contains(key), "docs/config.md に {key} がない");
     }
+}
+
+#[test]
+fn search_settings_are_drafted_and_checked() {
+    let root = std::env::temp_dir().join(format!("okfast-cfg-search-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("log.md"),
+        "---\ntype: Log\n---\n予約名なのでページにならない\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("meetings.md"),
+        "---\ntype: Note\nupdated: 2026-05-01\n---\n# 2026-04-01 定例\n## 未決\n- 保守\n| 日付 | 内容 |\n|---|---|\n| 2026/3/2 | 改定 |\n",
+    )
+    .unwrap();
+    let bundle = Bundle::load(&root).unwrap();
+
+    // 下書きは、バンドルにある日付の書き方だけを提案し、そのまま読める
+    let d = draft(&bundle);
+    assert!(
+        d.contains(r#"date_sources = ["table_row", "frontmatter:updated", "heading"]"#),
+        "{d}"
+    );
+    assert!(d.contains("# 根拠: 表の 1 列目が日付の行 1"), "{d}");
+    Config::parse(&d, None).unwrap();
+
+    let cfg = Config::parse(
+        r#"
+[search]
+show_keys = ["credibility"]
+[search.recent]
+date_sources  = ["table_row", "footnote_source"]
+table_columns = ["日にち"]
+[search.must_read]
+headings = ["未決", "矛盾"]
+pages    = [{ path = "log.md" }]
+"#,
+        None,
+    )
+    .unwrap();
+    let r = check(&bundle, &cfg, Some(Path::new("okfast.toml"))).unwrap();
+    let w = warnings(&r).join("\n");
+    assert!(w.contains("キー credibility を持つページがない"), "{w}");
+    assert!(w.contains("footnote_source: 日付の取れた行がない"), "{w}");
+    assert!(w.contains("列「日にち」を持つ表がない"), "{w}");
+    assert!(w.contains("path「log.md」に当たるページがない"), "{w}");
+    assert!(!w.contains("table_row"), "{w}");
+    let all = all_messages(&r);
+    assert!(all.contains("table_row: 日付の取れた行 1"), "{all}");
+    assert!(all.contains("見出しが当たる節: 1"), "{all}");
+    let _ = std::fs::remove_dir_all(&root);
 }

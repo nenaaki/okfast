@@ -6,6 +6,7 @@
 use crate::aliases::{BuildReport, Dictionary};
 use crate::bundle::Bundle;
 use crate::config::Config;
+use crate::dates;
 use crate::error::Result;
 use crate::markdown;
 use crate::normalize::{fold, is_short};
@@ -137,6 +138,7 @@ pub fn check(bundle: &Bundle, config: &Config, config_path: Option<&Path>) -> Re
     check_frontmatter(bundle, config, &build, &mut report);
     check_dictionary(&dict, config, &mut report);
     check_search(bundle, config, &mut report)?;
+    check_search_ranges(bundle, config, &mut report)?;
     Ok(report)
 }
 
@@ -508,5 +510,149 @@ fn check_search(bundle: &Bundle, config: &Config, report: &mut Report) -> Result
         total.len()
     ));
     report.sections.push(s.0);
+    Ok(())
+}
+
+/// `okfast search` の設定（show_keys・[search.recent]・[search.must_read]）を確かめる。
+fn check_search_ranges(bundle: &Bundle, config: &Config, report: &mut Report) -> Result<()> {
+    let sc = &config.search;
+    let recent = &sc.recent;
+    let must = &sc.must_read;
+
+    if !sc.show_keys.is_empty() {
+        let mut s = SectionBuilder::new("[search] show_keys");
+        for k in &sc.show_keys {
+            let n = bundle
+                .pages
+                .iter()
+                .filter(|p| p.frontmatter().string(k).is_some())
+                .count();
+            if n == 0 {
+                s.warn(format!("キー {k} を持つページがない"));
+            } else {
+                s.info(format!("キー {k} を持つページ: {n}"));
+            }
+        }
+        report.sections.push(s.0);
+    }
+
+    if !recent.date_sources.is_empty() || !recent.table_columns.is_empty() {
+        let mut s = SectionBuilder::new(format!(
+            "[search.recent] date_sources = [{}]",
+            recent.date_sources.join(", ")
+        ));
+        if recent.date_sources.is_empty() {
+            s.warn("table_columns があるが date_sources がない。日付は使わない");
+        }
+        let mut any = false;
+        for (name, src) in recent.date_sources.iter().zip(recent.sources()) {
+            let (mut lines, mut pages, mut example) = (0usize, 0usize, None);
+            for p in &bundle.pages {
+                let d = dates::line_dates(
+                    p,
+                    p.outline(),
+                    std::slice::from_ref(&src),
+                    &recent.table_columns,
+                );
+                let n = d.iter().flatten().count();
+                if n > 0 {
+                    lines += n;
+                    pages += 1;
+                    if example.is_none() {
+                        let i = d.iter().position(Option::is_some).unwrap_or(0);
+                        example = Some(format!(
+                            "{}:{} → {}",
+                            p.rel,
+                            p.body_line() + i,
+                            dates::format(d[i].unwrap_or_default())
+                        ));
+                    }
+                }
+            }
+            if lines == 0 {
+                s.warn(format!("{name}: 日付の取れた行がない"));
+            } else {
+                any = true;
+                s.info(format!(
+                    "{name}: 日付の取れた行 {lines}（{pages} ページ。例: {}）",
+                    example.unwrap_or_default()
+                ));
+            }
+        }
+        if !any && !recent.date_sources.is_empty() {
+            s.info("`okfast config init` が、バンドルにある日付の書き方を提案する");
+        }
+        for c in &recent.table_columns {
+            let found = bundle.pages.iter().any(|p| {
+                markdown::tables(p.body_lines())
+                    .iter()
+                    .any(|t| t.column(c).is_some())
+            });
+            if !found {
+                s.warn(format!("table_columns の列「{c}」を持つ表がない"));
+                let near = similar_headers(bundle, c);
+                if !near.is_empty() {
+                    s.info(format!("  「{c}」に似た見出し: {}", list(&near)));
+                }
+            }
+        }
+        report.sections.push(s.0);
+    }
+
+    if !must.headings.is_empty() || !must.pages.is_empty() {
+        let mut s = SectionBuilder::new("[search.must_read]");
+        if !must.headings.is_empty() {
+            let words: Vec<String> = must.headings.iter().map(|w| fold(w)).collect();
+            let mut found: Vec<String> = Vec::new();
+            for p in &bundle.pages {
+                for h in &p.outline().headings {
+                    let f = fold(&h.text);
+                    if words
+                        .iter()
+                        .any(|w| !w.is_empty() && f.contains(w.as_str()))
+                    {
+                        found.push(format!(
+                            "{}:{}「{}」",
+                            p.rel,
+                            p.body_line() + h.line,
+                            h.text
+                        ));
+                    }
+                }
+            }
+            if found.is_empty() {
+                s.warn(format!(
+                    "見出しに「{}」を含む節が、バンドルのどこにもない",
+                    must.headings.join("」「")
+                ));
+            } else {
+                s.info(format!(
+                    "見出しが当たる節: {}（{}）。主題のページのものだけを出す",
+                    found.len(),
+                    list(&found)
+                ));
+            }
+        }
+        for mp in &must.pages {
+            let g = compile_glob(&mp.path)?.compile_matcher();
+            let hits: Vec<&str> = bundle
+                .pages
+                .iter()
+                .filter(|p| g.is_match(&p.rel))
+                .map(|p| p.rel.as_str())
+                .collect();
+            if hits.is_empty() {
+                s.warn(format!("pages の path「{}」に当たるページがない", mp.path));
+            } else {
+                s.info(format!(
+                    "pages の path「{}」: {} ページ（上位 {} 範囲を出す）",
+                    mp.path,
+                    hits.len(),
+                    mp.top
+                ));
+            }
+        }
+        report.sections.push(s.0);
+    }
     Ok(())
 }

@@ -1,10 +1,10 @@
 //! MCP（Model Context Protocol）サーバー。標準入出力で JSON-RPC 2.0 を 1 行 1 メッセージでやりとりする。
 //!
 //! AI のクライアント（Claude Code など）が okfast をツールとして直接呼べるようにする。シェルを通さないので、
-//! シェルの起動・フック・許可の確認のぶんだけ速い。ツールは `grep` と `aliases` で、出力は CLI と同じ。
+//! シェルの起動・フック・許可の確認のぶんだけ速い。ツールは `grep`・`search`・`aliases` で、出力は CLI と同じ。
 //! 実行のしかた（常駐プロセスを使うか）は呼び出し側が `run` で渡す。
 
-use crate::command::{Command, GrepOptions};
+use crate::command::{Command, GrepOptions, SearchOptions};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
@@ -90,6 +90,7 @@ fn initialize(params: &Value, root: &str) -> Value {
         "instructions": format!(
             "OKF バンドル（{root}）の .md を語で探すときは、Grep・rg・grep ではなく okfast の grep ツールを使う。\
              同義語の辞書で言い換え、全角・半角・大文字小文字・空白の違いを吸収し、主題のページを先に順位順で返す。\
+             答えを探して読む範囲（ページ:開始行-終了行）を決めたいときは search ツールを使う。\
              結果のパスはバンドルの root からの相対パス。続きは行番号で Read する。"
         ),
     })
@@ -130,6 +131,32 @@ fn tools(root: &str) -> Value {
             "annotations": {"readOnlyHint": true, "openWorldHint": false}
         },
         {
+            "name": "search",
+            "title": "okfast search",
+            "description": format!(
+                "OKF バンドル（{root}）で、問いに答えるために読む範囲を探す。結果の 1 件は見出しで区切った節で、\
+                 `パス:開始行-終了行［日付｜§見出し］` と当たった行の抜粋。答えの行に語がなくても、同じ節に当たりがあれば\
+                 範囲に入る。順位は BM25（珍しい語ほど重い）で、主題のページを優先する。必ず読む範囲（設定した見出しの節）と、\
+                 日付の新しい範囲も足す。範囲は Read の offset・limit でそのまま読む。言い換えは grep と同じ。"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "terms": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "検索語"},
+                    "top": n("関連度の上位から出す範囲の数", SearchOptions::TOP),
+                    "per_page": n("1 ページから出す範囲の数", SearchOptions::PER_PAGE),
+                    "recent": {"type": "integer", "minimum": 0, "description": "上位のあとに足す、日付の新しい範囲の数（既定は設定の [search.recent] count）"},
+                    "since": {"type": "string", "description": "この日付（YYYY-MM-DD）より前の範囲と、日付の分からない範囲を出さない"},
+                    "sort": {"type": "string", "enum": ["relevance", "date"], "description": "並べ方（既定 relevance）"},
+                    "json": {"type": "boolean", "description": "結果を 1 行の JSON で出す（プログラム用）"},
+                    "all": {"type": "boolean", "description": "設定の exclude を無視してすべてのページを探す"},
+                    "no_aliases": {"type": "boolean", "description": "辞書で言い換えない"}
+                },
+                "required": ["terms"]
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
+        },
+        {
             "name": "aliases",
             "title": "okfast aliases",
             "description": "語が同義語の辞書でどう言い換えられるか（足す呼び名・条件つきの呼び名・主題のページ）を見る。",
@@ -153,6 +180,10 @@ fn call(params: &Value, run: &mut Runner<'_>) -> Result<Value, (i64, String)> {
         "grep" => Command::Grep {
             terms: terms(args)?,
             opts: grep_options(args)?,
+        },
+        "search" => Command::Search {
+            terms: terms(args)?,
+            opts: search_options(args)?,
         },
         "aliases" => Command::Aliases {
             terms: terms(args)?,
@@ -218,6 +249,42 @@ fn grep_options(args: &Value) -> Result<GrepOptions, (i64, String)> {
     })
 }
 
+fn search_options(args: &Value) -> Result<SearchOptions, (i64, String)> {
+    let flag = |k: &str| args.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let num = |k: &str| -> Result<Option<usize>, (i64, String)> {
+        match args.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .map(Some)
+                .ok_or((-32602, format!("{k} は 0 以上の整数"))),
+        }
+    };
+    let text = |k: &str| -> Result<Option<String>, (i64, String)> {
+        match args.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err((-32602, format!("{k} は文字列"))),
+        }
+    };
+    let sort_date = match text("sort")?.as_deref() {
+        None | Some("relevance") => false,
+        Some("date") => true,
+        Some(s) => return Err((-32602, format!("sort は relevance か date（「{s}」）"))),
+    };
+    Ok(SearchOptions {
+        no_aliases: flag("no_aliases"),
+        all: flag("all"),
+        json: flag("json"),
+        top: num("top")?.unwrap_or(SearchOptions::TOP),
+        per_page: num("per_page")?.unwrap_or(SearchOptions::PER_PAGE),
+        recent: num("recent")?,
+        since: text("since")?,
+        sort_date,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,7 +324,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["grep", "aliases"]);
+        assert_eq!(names, ["grep", "search", "aliases"]);
         assert_eq!(r[2]["result"]["content"][0]["text"], "結果");
         assert_eq!(r[2]["result"]["isError"], false);
         assert_eq!(r[3]["id"], "x");
