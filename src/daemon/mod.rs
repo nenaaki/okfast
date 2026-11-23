@@ -348,7 +348,7 @@ pub fn run(root: &Path, config: Option<&Path>, stats: bool, cmd: &Command) -> Ou
         root: root.clone(),
         config: config.clone(),
         stats,
-        command: cmd.clone(),
+        command: Box::new(cmd.clone()),
     };
     match request_within(body, timeout()) {
         Ok(Response::Done {

@@ -7,6 +7,7 @@
 //! - [`ranges`] — 見出しの節を単位に、読む範囲を BM25 の順位で返す検索
 //! - [`sections`] — 本文を見出しで節に分ける
 //! - [`dates`] — 行の日付の取り出し（設定の `date_sources` に従う）
+//! - [`timeline`] — search が返した範囲の、日付つきの行の時系列の一覧
 //! - [`daemon`] — すべてをメモリに持ち、ファイルの変更を監視して答える常駐プロセス
 //! - [`mcp`] — AI のクライアントからツールとして呼ばれる MCP サーバー
 
@@ -29,6 +30,7 @@ pub mod search;
 pub mod sections;
 pub mod selector;
 pub mod textindex;
+pub mod timeline;
 
 pub use error::{Error, Result};
 

@@ -7,6 +7,7 @@ use crate::dates;
 use crate::error::Result;
 use crate::ranges::{self, Kind, RangeOptions};
 use crate::search::{self, Options, Query, Term};
+use crate::timeline;
 use std::io::Write;
 
 /// 常駐プロセスでも実行できるコマンド。
@@ -117,6 +118,12 @@ pub struct SearchOptions {
     pub sort_date: bool,
     /// 空でなければ、この glob に当たるページだけを検索する（`exclude` に当たるページも含める）。
     pub paths: Vec<String>,
+    /// 必ず読む範囲と、関連度の上位のこの数の範囲の本文を返す（0 は返さない）。
+    pub body: usize,
+    /// 返す本文の合計行数の上限。
+    pub body_lines: usize,
+    /// 時系列の一覧に出す行の数（`None` は設定の `[search.timeline] max`。0 は出さない）。
+    pub timeline: Option<usize>,
 }
 
 impl SearchOptions {
@@ -124,6 +131,8 @@ impl SearchOptions {
     pub const TOP: usize = 8;
     /// 1 ページから出す範囲の数の既定値。
     pub const PER_PAGE: usize = 2;
+    /// 返す本文の合計行数の上限の既定値。
+    pub const BODY_LINES: usize = 400;
 }
 
 impl Default for SearchOptions {
@@ -138,6 +147,9 @@ impl Default for SearchOptions {
             since: None,
             sort_date: false,
             paths: Vec::new(),
+            body: 0,
+            body_lines: Self::BODY_LINES,
+            timeline: None,
         }
     }
 }
@@ -727,8 +739,11 @@ fn search_ranges(
     };
     let r = ranges::search_ranges(cx.bundle, dict, &q, cfg, &opt)?;
     let code = if r.ranges.is_empty() { 1 } else { 0 };
+    let bodies = choose_bodies(&r.ranges, o.body, o.body_lines);
+    let tl_max = o.timeline.unwrap_or(cfg.timeline.max);
+    let tl = timeline::timeline(&r.ranges, cfg, tl_max);
     if o.json {
-        print_ranges_json(&q, &r, cfg, dict, &o.paths, out);
+        print_ranges_json(&q, &r, cfg, dict, &o.paths, (&bodies, &tl), out);
         return Ok(code);
     }
 
@@ -787,6 +802,19 @@ fn search_ranges(
             dates::format(d)
         );
     }
+    if o.timeline.is_some_and(|n| n > 0) {
+        if !r.dated {
+            let _ = writeln!(
+                out,
+                "# 行の日付の取り方が設定にないため、時系列の一覧は出さない（[search.recent] date_sources）"
+            );
+        } else if !cfg.timeline.is_declared() {
+            let _ = writeln!(
+                out,
+                "# 一覧に出す行が設定にないため、時系列の一覧は出さない（[search.timeline] kinds・superseded か kinds_only = false）"
+            );
+        }
+    }
 
     let groups = [
         (
@@ -807,13 +835,24 @@ fn search_ranges(
         ),
     ];
     for (kind, title) in groups {
-        let mut items = r.ranges.iter().filter(|x| x.kind == kind).peekable();
+        let mut items = r
+            .ranges
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.kind == kind)
+            .peekable();
         if items.peek().is_none() {
             continue;
         }
         let _ = writeln!(out, "{title}");
-        for rg in items {
-            print_range(rg, cfg, out);
+        for (i, rg) in items {
+            print_range(rg, cfg, bodies[i], out);
+        }
+    }
+    if !tl.is_empty() {
+        let _ = writeln!(out, "## 時系列（返した範囲の日付つきの行。新しい順）");
+        for e in &tl {
+            print_timeline_entry(e, out);
         }
     }
     if !r.rest.is_empty() {
@@ -831,13 +870,88 @@ fn search_ranges(
         };
         let _ = writeln!(out, "# ほかの範囲（順位順）: {}{more}", items.join(", "));
     }
-    if !r.ranges.is_empty() {
+    let shown = bodies
+        .iter()
+        .filter(|b| matches!(b, BodyChoice::Shown))
+        .count();
+    if shown == r.ranges.len() && shown > 0 {
+        let _ = writeln!(out, "# 範囲の本文はすべて上に出した");
+    } else if shown > 0 {
+        let _ = writeln!(
+            out,
+            "# 本文を出していない範囲は Read で読む（offset = 開始行、limit = 終了行 - 開始行 + 1）"
+        );
+    } else if !r.ranges.is_empty() {
         let _ = writeln!(
             out,
             "# 範囲は Read で読む（offset = 開始行、limit = 終了行 - 開始行 + 1）"
         );
     }
     Ok(code)
+}
+
+/// 範囲の本文を返すか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyChoice {
+    /// 返さない（求められていない）。
+    No,
+    /// 返す。
+    Shown,
+    /// 求められたが、本文の合計行数の上限を超えるので返さない。
+    OverLimit,
+}
+
+/// 範囲ごとに本文を返すかを決める。必ず読む範囲と、関連度の上位の先頭 `top` 範囲を、並びの順に
+/// 合計 `max_lines` 行まで。上限を超えた範囲から下は返さない（Read で読む）。
+fn choose_bodies(ranges: &[ranges::Range<'_>], top: usize, max_lines: usize) -> Vec<BodyChoice> {
+    let mut out = vec![BodyChoice::No; ranges.len()];
+    if top == 0 {
+        return out;
+    }
+    let (mut used, mut n_top, mut over) = (0usize, 0usize, false);
+    for (i, rg) in ranges.iter().enumerate() {
+        let wanted = match rg.kind {
+            Kind::Must => true,
+            Kind::Top if n_top < top => {
+                n_top += 1;
+                true
+            }
+            _ => false,
+        };
+        if !wanted {
+            continue;
+        }
+        if !over && used + rg.lines() <= max_lines {
+            used += rg.lines();
+            out[i] = BodyChoice::Shown;
+        } else {
+            over = true;
+            out[i] = BodyChoice::OverLimit;
+        }
+    }
+    out
+}
+
+/// 時系列の 1 行: `日付｜パス:行｜種類｜本文の抜粋`（変更の印があれば `｜→ 日付 に変更（パス:行）`）。
+fn print_timeline_entry(e: &timeline::Entry<'_>, out: &mut impl Write) {
+    let mut line = format!(
+        "{}｜{}:{}｜{}｜{}",
+        dates::format(e.date),
+        e.rel,
+        e.line,
+        e.kind.unwrap_or("-"),
+        snippet(e.text.trim(), RANGE_SNIPPET)
+    );
+    if let Some(s) = &e.superseded {
+        match s.date {
+            Some(d) => line.push_str(&format!("｜→ {} に変更", dates::format(d))),
+            None => line.push_str("｜→ 変更あり（変更先の日付は不明）"),
+        }
+        if let Some((rel, l)) = s.target {
+            line.push_str(&format!("（{rel}:{l}）"));
+        }
+    }
+    let _ = writeln!(out, "{line}");
 }
 
 /// 範囲の見出しに付ける注記（日付・見出し・frontmatter の値・切り出し）。
@@ -865,19 +979,38 @@ fn range_notes(rg: &ranges::Range<'_>, cfg: &crate::config::SearchConfig) -> Vec
     notes
 }
 
+/// 範囲の本文の 1 行の文字数の上限（極端に長い行だけを切る）。
+const BODY_COLUMNS: usize = 2000;
 /// 範囲の抜粋に出す当たった行の数。
 const RANGE_EXCERPT: usize = 2;
 /// 範囲の抜粋の 1 行の文字数。
 const RANGE_SNIPPET: usize = 160;
 
 /// 1 つの範囲: `パス:開始行-終了行［注記］` と、点の高い当たった行（行の順）。
-fn print_range(rg: &ranges::Range<'_>, cfg: &crate::config::SearchConfig, out: &mut impl Write) {
+fn print_range(
+    rg: &ranges::Range<'_>,
+    cfg: &crate::config::SearchConfig,
+    body: BodyChoice,
+    out: &mut impl Write,
+) {
     let notes = range_notes(rg, cfg);
     let mut head = format!("{}:{}-{}", rg.rel, rg.from, rg.to);
     if !notes.is_empty() {
         head.push_str(&format!("［{}］", notes.join("｜")));
     }
     let _ = writeln!(out, "{head}");
+    if body == BodyChoice::Shown {
+        for (line, text) in rg.body() {
+            let _ = writeln!(out, "  {line}: {}", clip(text, BODY_COLUMNS));
+        }
+        return;
+    }
+    if body == BodyChoice::OverLimit {
+        let _ = writeln!(
+            out,
+            "  （本文は --body-lines の上限を超えるため出さない。Read で読む）"
+        );
+    }
     if rg.hits.is_empty() {
         let _ = writeln!(out, "  （語の当たりはない）");
         return;
@@ -910,6 +1043,7 @@ fn print_ranges_json(
     cfg: &crate::config::SearchConfig,
     dict: &Dictionary,
     paths: &[String],
+    (bodies, tl): (&[BodyChoice], &[timeline::Entry<'_>]),
     out: &mut impl Write,
 ) {
     use serde::Serialize;
@@ -928,6 +1062,28 @@ fn print_ranges_json(
         topics: Vec<JTopic<'a>>,
         ranges: Vec<JRange<'a>>,
         rest: Vec<JRest<'a>>,
+        timeline: Vec<JEntry<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JEntry<'a> {
+        date: String,
+        rel: &'a str,
+        line: usize,
+        kind: Option<&'a str>,
+        superseded: bool,
+        superseded_by: Option<JTarget<'a>>,
+        text: std::borrow::Cow<'a, str>,
+    }
+    #[derive(Serialize)]
+    struct JTarget<'a> {
+        date: Option<String>,
+        rel: Option<&'a str>,
+        line: Option<usize>,
+    }
+    #[derive(Serialize)]
+    struct JLine<'a> {
+        line: usize,
+        text: std::borrow::Cow<'a, str>,
     }
     #[derive(Serialize)]
     struct JTopic<'a> {
@@ -966,6 +1122,8 @@ fn print_ranges_json(
         must: bool,
         recent: bool,
         hits: Vec<JHit<'a>>,
+        body: Option<Vec<JLine<'a>>>,
+        body_over_limit: bool,
     }
     #[derive(Serialize)]
     struct JHit<'a> {
@@ -1009,7 +1167,8 @@ fn print_ranges_json(
     let ranges = r
         .ranges
         .iter()
-        .map(|x| JRange {
+        .zip(bodies)
+        .map(|(x, &b)| JRange {
             rel: x.rel,
             from: x.from,
             to: x.to,
@@ -1040,6 +1199,15 @@ fn print_ranges_json(
                     date: h.date.map(dates::format),
                 })
                 .collect(),
+            body: (b == BodyChoice::Shown).then(|| {
+                x.body()
+                    .map(|(line, text)| JLine {
+                        line,
+                        text: clip(text, BODY_COLUMNS),
+                    })
+                    .collect()
+            }),
+            body_over_limit: b == BodyChoice::OverLimit,
         })
         .collect();
     let rest = r
@@ -1076,6 +1244,22 @@ fn print_ranges_json(
             .collect(),
         ranges,
         rest,
+        timeline: tl
+            .iter()
+            .map(|e| JEntry {
+                date: dates::format(e.date),
+                rel: e.rel,
+                line: e.line,
+                kind: e.kind,
+                superseded: e.superseded.is_some(),
+                superseded_by: e.superseded.as_ref().map(|s| JTarget {
+                    date: s.date.map(dates::format),
+                    rel: s.target.map(|t| t.0),
+                    line: s.target.map(|t| t.1),
+                }),
+                text: clip(e.text, GrepOptions::MAX_COLUMNS),
+            })
+            .collect(),
     };
     let _ = serde_json::to_writer(&mut *out, &v);
     let _ = writeln!(out);

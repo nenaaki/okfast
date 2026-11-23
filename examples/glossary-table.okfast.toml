@@ -39,3 +39,9 @@ table_columns = ["日付"]
 topics   = 2
 headings = ["未決", "矛盾"]
 pages    = [{ path = "decisions/*.md", top = 3 }]
+
+# 返した範囲の日付つきの行の時系列の一覧。行の種類と変更の印は、バンドルの書き方に合わせて宣言する
+[search.timeline]
+max        = 30
+kinds      = [{ name = "decision", pattern = "【決定】" }, { name = "conclusion", pattern = "【結論】" }]
+superseded = ["【結論・{date}に変更】"]

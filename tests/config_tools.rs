@@ -262,6 +262,13 @@ fn reference_documents_every_key() {
         "`topics`",
         "`headings`",
         "`top`",
+        "[search.timeline]",
+        "`kinds`",
+        "`superseded`",
+        "`kinds_only`",
+        "`hits_only`",
+        "`max`",
+        "{date}",
         "config check",
         "config init",
     ] {
@@ -319,5 +326,43 @@ pages    = [{ path = "log.md" }]
     let all = all_messages(&r);
     assert!(all.contains("table_row: 日付の取れた行 1"), "{all}");
     assert!(all.contains("見出しが当たる節: 1"), "{all}");
+
+    // 時系列の一覧: パターンに当たる行の数と例、読めない変更の印
+    std::fs::write(
+        root.join("records.md"),
+        "---\ntype: Note\n---\n| 日付 | 内容 |\n|---|---|\n| 2026-10-01 | 【結論・11/20に変更】据え置き |\n| 2026-11-20 | 【結論】値上げ |\n",
+    )
+    .unwrap();
+    let bundle = Bundle::load(&root).unwrap();
+    let cfg = Config::parse(
+        r#"
+[search.timeline]
+kinds = [{ name = "conclusion", pattern = "【結論】" }, { name = "decision", pattern = "【決定】" }]
+superseded = ["【結論・{date}に変更】", "（廃止）"]
+"#,
+        None,
+    )
+    .unwrap();
+    let r = check(&bundle, &cfg, Some(Path::new("okfast.toml"))).unwrap();
+    let w = warnings(&r).join("\n");
+    assert!(w.contains("date_sources がないので"), "{w}");
+    assert!(
+        w.contains("kinds の decision（「【決定】」）に当たる行がない"),
+        "{w}"
+    );
+    assert!(
+        w.contains("superseded の「（廃止）」に当たる行がない"),
+        "{w}"
+    );
+    // 年のない日付は generated.at がないので読めない
+    assert!(
+        w.contains("の {date} の部分が日付として読めない行: 1（例: records.md:6）"),
+        "{w}"
+    );
+    let all = all_messages(&r);
+    assert!(
+        all.contains("kinds の conclusion（「【結論】」）に当たる行: 1（例: records.md:7）"),
+        "{all}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

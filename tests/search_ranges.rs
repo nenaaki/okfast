@@ -732,3 +732,319 @@ fn table_row_uses_only_a_leading_date() {
     assert_eq!(dates, vec![Value::from("2026-03-02"), Value::Null], "{v}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn body_returns_range_lines() {
+    // ファイル上の行: 4 # 概要 / 7 ## 価格 / 8 価格は次のとおり。 / 10 - 1 台 1.2 万円 / 12 ## 保守
+    let body = format!(
+        "{FM}# 概要\nWidget の説明。\n\n## 価格\n価格は次のとおり。\n\n- 1 台 1.2 万円\n\n## 保守\n別の話。価格はなし\n"
+    );
+    let root = bundle_dir("body", &[("a.md", &body)]);
+    let opts = SearchOptions {
+        body: 1,
+        ..SearchOptions::default()
+    };
+    let v = json(&root, "", &["価格"], opts.clone());
+    let r = &v["ranges"];
+    assert_eq!(r[0]["from"], 7);
+    assert_eq!(
+        r[0]["body"],
+        serde_json::json!([
+            {"line": 7, "text": "## 価格"},
+            {"line": 8, "text": "価格は次のとおり。"},
+            {"line": 9, "text": ""},
+            {"line": 10, "text": "- 1 台 1.2 万円"},
+        ])
+    );
+    assert_eq!(r[0]["body_over_limit"], false);
+    // 上位 1 範囲だけ
+    assert_eq!(r[1]["body"], Value::Null);
+    assert_eq!(r[1]["body_over_limit"], false);
+
+    let (_, text) = run(&root, "", &["価格"], opts.clone());
+    assert!(
+        text.contains(
+            "a.md:7-10［§概要 > 価格］\n  7: ## 価格\n  8: 価格は次のとおり。\n  9: \n  10: - 1 台 1.2 万円\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("# 本文を出していない範囲は Read で読む"),
+        "{text}"
+    );
+
+    // 合計行数の上限を超えた範囲から下は抜粋だけ
+    let opts = SearchOptions {
+        body: 2,
+        body_lines: 3,
+        ..SearchOptions::default()
+    };
+    let v = json(&root, "", &["価格"], opts.clone());
+    assert_eq!(v["ranges"][0]["body"], Value::Null);
+    assert_eq!(v["ranges"][0]["body_over_limit"], true);
+    assert_eq!(v["ranges"][1]["body_over_limit"], true);
+    let (_, text) = run(&root, "", &["価格"], opts);
+    assert!(
+        text.contains("（本文は --body-lines の上限を超えるため出さない。Read で読む）"),
+        "{text}"
+    );
+    assert!(text.contains("# 範囲は Read で読む"), "{text}");
+
+    // すべて返せば Read の案内はしない
+    let (_, text) = run(
+        &root,
+        "",
+        &["価格"],
+        SearchOptions {
+            body: 5,
+            ..SearchOptions::default()
+        },
+    );
+    assert!(text.contains("# 範囲の本文はすべて上に出した"), "{text}");
+    assert!(!text.contains("Read で読む"), "{text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn body_of_partial_range_is_only_the_part() {
+    let mut body = format!("{FM}# 長い節\n");
+    for i in 0..60 {
+        body.push_str(&format!("行 {i}\n"));
+    }
+    body.push_str("価格の行\n");
+    let root = bundle_dir("body-partial", &[("a.md", &body)]);
+    let v = json(
+        &root,
+        "[search.sections]\nwindow = 1\n",
+        &["価格"],
+        SearchOptions {
+            body: 1,
+            ..SearchOptions::default()
+        },
+    );
+    let r = &v["ranges"][0];
+    assert_eq!(r["partial"], true);
+    let lines: Vec<u64> = r["body"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["line"].as_u64().unwrap())
+        .collect();
+    let (from, to) = (r["from"].as_u64().unwrap(), r["to"].as_u64().unwrap());
+    assert_eq!(lines, (from..=to).collect::<Vec<_>>());
+    assert_eq!(
+        r["body"].as_array().unwrap().last().unwrap()["text"],
+        "価格の行"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+const TIMELINE_CFG: &str = r#"
+[search.recent]
+date_sources = ["table_row", "heading"]
+
+[search.timeline]
+kinds = [
+  { name = "decision",   pattern = "【決定】" },
+  { name = "conclusion", pattern = "【結論】" },
+]
+superseded = ["【結論・{date}に変更】"]
+"#;
+
+fn timeline_bundle(name: &str) -> PathBuf {
+    bundle_dir(
+        name,
+        &[
+            (
+                "records.md",
+                "---\ntype: Log\ngenerated: { by: human:someone, at: 2026-11-23T09:00:00Z }\n---\n\
+# 価格の記録\n\
+| 日 | 内容 |\n\
+|---|---|\n\
+| 10/1 | 【結論・11/20に変更】据え置き |\n\
+| 10/15 | 価格の資料を共有した |\n\
+| 11/20 | 【結論】5% 上げる |\n\
+| 11/21 | 【決定】価格の告知は 12 月 |\n",
+            ),
+            (
+                "m.md",
+                &format!(
+                    "{FM}# 2026-09-01 定例\n価格の話【決定】見積もりは月末\n\n# 日付なし\n価格【決定】日付のない行\n"
+                ),
+            ),
+            (
+                "other.md",
+                &format!("{FM}# 2026-12-01 別件\n【決定】価格と関係ない話\n"),
+            ),
+        ],
+    )
+}
+
+#[test]
+fn timeline_lists_dated_lines_of_returned_ranges() {
+    let root = timeline_bundle("timeline");
+    // other.md は返す範囲に入らないよう --path で外す
+    let opts = SearchOptions {
+        paths: vec!["records.md".into(), "m.md".into()],
+        ..SearchOptions::default()
+    };
+    let v = json(&root, TIMELINE_CFG, &["価格"], opts.clone());
+    let tl = v["timeline"].as_array().unwrap();
+    let rows: Vec<(String, String, u64, Value)> = tl
+        .iter()
+        .map(|e| {
+            (
+                e["date"].as_str().unwrap().to_string(),
+                e["rel"].as_str().unwrap().to_string(),
+                e["line"].as_u64().unwrap(),
+                e["kind"].clone(),
+            )
+        })
+        .collect();
+    // ファイル上の行: records.md 5 見出し / 8 10/1 / 9 10/15 / 10 11/20 / 11 11/21、m.md 4 見出し / 5 本文
+    // 既定では語に当たった行だけ。ただし変更の印のある行（8）は当たっていなくても出す。語のない 10 は出さない
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "2026-11-21".into(),
+                "records.md".into(),
+                11,
+                "decision".into()
+            ),
+            ("2026-10-01".into(), "records.md".into(), 8, Value::Null),
+            ("2026-09-01".into(), "m.md".into(), 5, "decision".into()),
+        ]
+    );
+    // 変更の印は、変更先の日付の行を指す（印の行には種類がないので、種類の付いた行）。変更先は一覧に
+    // 出さない行（語に当たっていない行）からも探す
+    assert_eq!(tl[1]["superseded"], true);
+    assert_eq!(
+        tl[1]["superseded_by"],
+        serde_json::json!({"date": "2026-11-20", "rel": "records.md", "line": 10})
+    );
+    assert_eq!(tl[0]["superseded"], false);
+    assert_eq!(tl[0]["superseded_by"], Value::Null);
+
+    let (_, text) = run(&root, TIMELINE_CFG, &["価格"], opts.clone());
+    assert!(
+        text.contains(
+            "## 時系列（返した範囲の日付つきの行。新しい順）\n2026-11-21｜records.md:11｜decision｜| 11/21 | 【決定】価格の告知は 12 月 |\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "2026-10-01｜records.md:8｜-｜| 10/1 | 【結論・11/20に変更】据え置き |｜→ 2026-11-20 に変更（records.md:10）\n"
+        ),
+        "{text}"
+    );
+    // 返した範囲の外（other.md）は入らない
+    assert!(!text.contains("関係ない話"), "{text}");
+
+    // 上限
+    let v = json(
+        &root,
+        TIMELINE_CFG,
+        &["価格"],
+        SearchOptions {
+            timeline: Some(2),
+            ..opts.clone()
+        },
+    );
+    assert_eq!(v["timeline"].as_array().unwrap().len(), 2);
+    let (_, text) = run(
+        &root,
+        TIMELINE_CFG,
+        &["価格"],
+        SearchOptions {
+            timeline: Some(0),
+            ..opts.clone()
+        },
+    );
+    assert!(!text.contains("## 時系列"), "{text}");
+
+    let lines_of = |cfg: &str| -> Vec<(String, u64)> {
+        json(&root, cfg, &["価格"], opts.clone())["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["rel"].as_str().unwrap().to_string(),
+                    e["line"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    // hits_only = false なら語に当たっていない行も出す
+    let lines = lines_of(&format!("{TIMELINE_CFG}hits_only = false\n"));
+    assert!(lines.contains(&("records.md".into(), 10)), "{lines:?}");
+    assert!(!lines.contains(&("records.md".into(), 9)), "{lines:?}");
+
+    // kinds_only = false なら種類のない行も（既定では語に当たった行だけ）
+    let lines = lines_of(&format!("{TIMELINE_CFG}kinds_only = false\n"));
+    assert!(lines.contains(&("records.md".into(), 9)), "{lines:?}");
+    assert!(!lines.contains(&("m.md".into(), 4)), "{lines:?}");
+
+    // 両方 false なら日付の取れる行すべて（区切りの行・空行は除く）
+    let lines = lines_of(&format!(
+        "{TIMELINE_CFG}kinds_only = false\nhits_only = false\n"
+    ));
+    assert!(lines.contains(&("records.md".into(), 9)), "{lines:?}");
+    assert!(lines.contains(&("m.md".into(), 4)), "{lines:?}");
+    assert!(
+        !lines.iter().any(|(r, l)| r == "records.md" && *l == 7),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|(r, l)| r == "m.md" && *l == 6),
+        "{lines:?}"
+    );
+
+    // 種類も印も宣言しなければ出さない。--timeline を指定したら理由を示す
+    let bare = "[search.recent]\ndate_sources = [\"table_row\"]\n";
+    let v = json(&root, bare, &["価格"], opts.clone());
+    assert_eq!(v["timeline"], serde_json::json!([]));
+    let (_, text) = run(
+        &root,
+        bare,
+        &["価格"],
+        SearchOptions {
+            timeline: Some(10),
+            ..opts.clone()
+        },
+    );
+    assert!(
+        text.contains("時系列の一覧は出さない（[search.timeline]"),
+        "{text}"
+    );
+    let (_, text) = run(
+        &root,
+        "",
+        &["価格"],
+        SearchOptions {
+            timeline: Some(10),
+            ..opts
+        },
+    );
+    assert!(
+        text.contains("時系列の一覧は出さない（[search.recent] date_sources）"),
+        "{text}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn timeline_config_is_validated() {
+    for bad in [
+        "[search.timeline]\nkinds = [{ name = \"\", pattern = \"x\" }]\n",
+        "[search.timeline]\nkinds = [{ name = \"a\", pattern = \"\" }]\n",
+        "[search.timeline]\nsuperseded = [\"{date}\"]\n",
+        "[search.timeline]\nsuperseded = [\"{date}・{date}\"]\n",
+        "[search.timeline]\nunknown = 1\n",
+    ] {
+        assert!(Config::parse(bad, None).is_err(), "{bad}");
+    }
+    assert!(Config::parse(TIMELINE_CFG, None).is_ok());
+}

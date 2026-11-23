@@ -124,6 +124,8 @@ okfast -b <root> search --since 2026-01-01 価格    # その日以降の日付�
 okfast -b <root> search --sort date 価格           # 日付の新しい順
 okfast -b <root> search --recent 0 価格            # 新しい記録を足さない
 okfast -b <root> search --path "meetings/**" 価格  # この glob のページだけ（複数可。exclude のページも含める）
+okfast -b <root> search --body 3 価格              # 必ず読む範囲と上位 3 範囲の本文も返す（合計 400 行まで）
+okfast -b <root> search --timeline 10 価格         # 時系列の一覧を 10 行まで（既定は設定の [search.timeline] max）
 okfast -b <root> search --json 価格                # 1 行の JSON
 ```
 
@@ -153,9 +155,11 @@ notes/meeting.md:6-7［2026-04-01｜§議題］
 - 範囲の見出しの `［…］` には、日付・`§見出し`（親の見出しが 1 つあれば `§親 > 見出し`）・`[search] show_keys` に書いた frontmatter の値が入ります
 - `--path <glob>` で、検索するページを絞れます（複数可）。`exclude` に当たるページでも、`--path` で明示すれば含めます
 - 抜粋は点の高い当たった行 2 行です。範囲は Read の `offset` = 開始行、`limit` = 終了行 - 開始行 + 1 で読みます
+- **範囲の本文**: `--body N` で、必ず読む範囲と関連度の上位 N 範囲の本文を、範囲の見出しの行のあとに `行番号: 本文` で返します（抜粋の代わり。節の一部なら、その部分だけ）。返した範囲は Read しなくて済みます。合計は `--body-lines`（既定 400 行）まで。上限を超えた範囲から下は今までどおり抜粋だけにし、`（本文は --body-lines の上限を超えるため出さない。Read で読む）` と示します
+- **時系列の一覧**: 返した範囲（必ず読む範囲・上位・新しい記録）の中の、日付の取れる行のうち検索語に当たった行（`hits_only`）を日付の新しい順に並べ、`## 時系列` の下に `日付｜パス:行｜種類｜本文の抜粋` で出します。行の種類（決定・結論など）と「後の記録で変更された」の印は、`[search.timeline]` にパターンで宣言します（okfast は行の意味を知らない）。変更の印のある行には `｜→ 2026-11-20 に変更（パス:行）` を付け、同じ集まりの中にその日付の同じ種類の行があれば指します。日付の取り方は `date_sources` と同じで、範囲の外の行は入れません。種類も変更の印も宣言しなければ出しません
 - 終了コードは、範囲ありが 0、なしが 1、エラーが 2 です
 
-設定の書き方は [docs/config.md](docs/config.md) の `[search.sections]`・`[search.recent]`・`[search.must_read]` にあります。
+設定の書き方は [docs/config.md](docs/config.md) の `[search.sections]`・`[search.recent]`・`[search.must_read]`・`[search.timeline]` にあります。
 
 `search --json` は、範囲ごとの当たった行と点を返します。バンドル側のスクリプトが、ここに独自の情報を足して表示することを想定しています。
 
@@ -166,12 +170,17 @@ notes/meeting.md:6-7［2026-04-01｜§議題］
  "ranges":[{"rel":"notes/widget.md","from":10,"to":16,"title":"Widget Pro","heading":"価格","headings":["概要","価格"],
             "section":[10,16],"partial":false,"date":"2026-03-02","meta":{"credibility":"A"},"score":4.038,"terms":1,
             "boosted":false,"topic":1.0,"must":false,"recent":false,
-            "hits":[{"line":10,"text":"## 価格","score":4.038,"date":null}]}],
- "rest":[{"rel":"notes/a.md","from":3,"to":9,"score":0.5,"date":null}]}
+            "hits":[{"line":10,"text":"## 価格","score":4.038,"date":null}],
+            "body":[{"line":10,"text":"## 価格"},{"line":11,"text":"価格は次のとおり。"}],"body_over_limit":false}],
+ "rest":[{"rel":"notes/a.md","from":3,"to":9,"score":0.5,"date":null}],
+ "timeline":[{"date":"2026-03-02","rel":"notes/widget.md","line":14,"kind":"decision","superseded":false,
+              "superseded_by":null,"text":"| 2026-03-02 | 【決定】価格を改定 |"}]}
 ```
 
 - `ranges` は出す範囲を、必ず読む範囲（`must`）→ 上位 → 新しい記録（`recent`）の順に並べます。`rest` は出さなかった範囲（順位順）
 - `section` は節全体の行、`partial` は節の一部を切り出したか、`meta` は `show_keys` の値です。`hits` は範囲の中の当たった行すべて（1 行 300 文字まで）
+- `body` は `--body` で返した範囲の本文（行番号つき。1 行 2000 文字まで）、返さなかった範囲では `null`。`body_over_limit` は、本文を求めたが `--body-lines` の上限を超えたので返さなかったか
+- `timeline` は時系列の一覧（日付の新しい順）。`kind` は種類の名前（なければ `null`）、`superseded` は変更の印があるか、`superseded_by` は印の中身 `{date, rel, line}`（変更先の日付と、それを指す行。分からなければ `null`）
 - `headings` は節の見出しの階層（いちばん上から）、`heading` はその最後の見出しです。`topic` はページの主題の度合い `share`（0〜1）、`boosted` は辞書の boost のリンク先か。`topics` は主題のページを `share` の高い順に並べたもの、`paths` は `--path` の glob です
 
 ### 常駐プロセス
@@ -211,7 +220,7 @@ OKF 0.2 には同義語の決まりがない（type も frontmatter のキーも
 
 - シェルを通さないので、呼び出しのたびのシェルの起動・フック・許可の確認がかかりません（Windows では 1 回あたり数秒になることがあります）
 - Bash を持たないエージェント（Read・Grep・Glob だけのものなど）にも、ツールとして渡せます
-- ツールの引数は CLI のオプションと同じ名前です（`terms`、`pages`、`files`、`count`、`json`、`context`、`max_per_page`、`max_pages`、`max_columns`、`max_chars`、`full`、`all`、`no_aliases`）。search は `terms`、`top`、`per_page`、`recent`、`since`、`sort`（`relevance` か `date`）、`path`（glob の配列）、`json`、`all`、`no_aliases`。出力も CLI と同じです
+- ツールの引数は CLI のオプションと同じ名前です（`terms`、`pages`、`files`、`count`、`json`、`context`、`max_per_page`、`max_pages`、`max_columns`、`max_chars`、`full`、`all`、`no_aliases`）。search は `terms`、`top`、`per_page`、`recent`、`since`、`sort`（`relevance` か `date`）、`path`（glob の配列）、`body`、`body_lines`、`timeline`、`json`、`all`、`no_aliases`。出力も CLI と同じです
 - 検索は CLI と同じく常駐プロセスを使います（`--no-daemon` を付ければ使いません）。ファイルの変更はすぐに反映します
 
 Claude Code では、バンドルを持つリポジトリの `.mcp.json` に書きます（`okfast` に PATH が通っていなければ、実行ファイルのパスを書きます）。
@@ -251,7 +260,7 @@ Claude Code は、何も言わなければ Grep ツール（中身は ripgrep）
 ## ナレッジの検索
 
 - `knowledge/` の中を語で探すときは、Grep ツール・rg・grep を使わず `okfast -b knowledge grep <語>...` を使う（okfast-search スキル）
-- 問いに答えるために読む範囲を決めたいときは `okfast -b knowledge search <語>...` を使う。結果の `パス:開始行-終了行` をそのまま Read する
+- 問いに答えるために読む範囲を決めたいときは `okfast -b knowledge search --body 3 <語>...` を使う。本文の付いた範囲は Read しなくてよい。本文のない範囲は `パス:開始行-終了行` をそのまま Read する
 - okfast は同義語の辞書で言い換え、表記の揺れを吸収する。自分で同義語を `|` で並べなくてよい
 - Grep を使ってよいのは、正規表現が必要なとき、`.md` 以外のファイルを探すとき、okfast がエラーになったときだけ
 ```
@@ -293,6 +302,7 @@ src/search.rs       行単位の検索（memmem / Teddy で当たりそうな行
 src/sections.rs     本文を見出しで節に分ける（ページごとに 1 回だけ作る）
 src/dates.rs        行の日付の取り出し（設定の date_sources に従う）
 src/ranges.rs       読む範囲を返す検索（節にまとめ、BM25 で順位を付け、新しい記録・必ず読む範囲を足す）
+src/timeline.rs     search が返した範囲の、日付つきの行の時系列の一覧（種類・変更の印は設定のパターン）
 src/command.rs      grep・search・aliases の実行と出力（CLI と常駐プロセスで共有）
 src/mcp.rs          MCP サーバー（標準入出力の JSON-RPC。ツールは grep・search・aliases）
 src/daemon/         常駐プロセス（mod.rs: 起動と問い合わせ、state.rs: メモリ上の状態と監視、ipc.rs: 接続口、protocol.rs: 形式）
