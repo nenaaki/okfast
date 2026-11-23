@@ -78,6 +78,37 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
+    /// 読む範囲（見出しで区切った節）を、関連度（BM25）の順に返す。答えの行に語がなくても、
+    /// 同じ節に当たりがあれば範囲に入る。出力の 1 件は `パス:開始行-終了行［日付｜§見出し］` と抜粋。
+    Search {
+        /// 検索語（複数指定はどれかに当たる行）。
+        #[arg(required = true)]
+        terms: Vec<String>,
+        /// 辞書で言い換えない。
+        #[arg(long)]
+        no_aliases: bool,
+        /// 設定の exclude を無視してすべてのページを検索する。
+        #[arg(long)]
+        all: bool,
+        /// 結果を 1 行の JSON で出す（範囲ごとの当たった行と点。プログラム用）。
+        #[arg(long)]
+        json: bool,
+        /// 関連度の上位から出す範囲の数（0 は無制限）。
+        #[arg(short = 'n', long, default_value_t = command::SearchOptions::TOP)]
+        top: usize,
+        /// 1 ページから出す範囲の数（0 は無制限）。
+        #[arg(long, default_value_t = command::SearchOptions::PER_PAGE)]
+        per_page: usize,
+        /// 上位のあとに足す、日付の新しい範囲の数（省略時は設定の [search.recent] count）。
+        #[arg(long)]
+        recent: Option<usize>,
+        /// この日付（YYYY-MM-DD）より前の範囲と、日付の分からない範囲を出さない。
+        #[arg(long)]
+        since: Option<String>,
+        /// 並べ方: relevance（関連度）か date（日付の新しい順）。
+        #[arg(long, value_parser = ["relevance", "date"], default_value = "relevance")]
+        sort: String,
+    },
     /// 語がどう言い換えられるかを表示する。
     Aliases {
         /// 語。
@@ -92,11 +123,11 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// MCP サーバーとして動く（標準入出力。AI のクライアントが grep・aliases をツールとして直接呼ぶ）。
+    /// MCP サーバーとして動く（標準入出力。AI のクライアントが grep・search・aliases をツールとして直接呼ぶ）。
     /// 検索は grep と同じく常駐プロセスを使う。
     Mcp,
     /// 常駐プロセス（すべてをメモリに持ち、ファイルの変更を監視して答える）を操作する。
-    /// grep と aliases は自動で常駐プロセスを使う。
+    /// grep・search・aliases は自動で常駐プロセスを使う。
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -229,6 +260,29 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
             terms: terms.clone(),
             json: *json,
         },
+        Command::Search {
+            terms,
+            no_aliases,
+            all,
+            json,
+            top,
+            per_page,
+            recent,
+            since,
+            sort,
+        } => command::Command::Search {
+            terms: terms.clone(),
+            opts: command::SearchOptions {
+                no_aliases: *no_aliases,
+                all: *all,
+                json: *json,
+                top: *top,
+                per_page: *per_page,
+                recent: *recent,
+                since: since.clone(),
+                sort_date: sort == "date",
+            },
+        },
         Command::Grep {
             terms,
             no_aliases,
@@ -267,7 +321,7 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
     Ok(ExitCode::from(code))
 }
 
-/// grep・aliases を実行して、終了コード・標準出力・標準エラーを返す。常駐プロセスを使えればそれで、
+/// grep・search・aliases を実行して、終了コード・標準出力・標準エラーを返す。常駐プロセスを使えればそれで、
 /// 使えなければこのプロセスで読み込んで実行する。
 fn execute(cli: &Cli, cmd: &command::Command) -> okfast::Result<(u8, Vec<u8>, Vec<u8>)> {
     if !cli.no_daemon && daemon::enabled() {

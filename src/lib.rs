@@ -4,6 +4,7 @@
 //! - [`config`] — バンドルごとの設定 `okfast.toml`
 //! - [`aliases`] — 設定に従って同義語の辞書を作る
 //! - [`search`] — 同義語で言い換える行単位の検索
+//! - [`ranges`] — 見出しの節を単位に、読む範囲を BM25 の順位で返す検索
 //! - [`daemon`] — すべてをメモリに持ち、ファイルの変更を監視して答える常駐プロセス
 //! - [`mcp`] — AI のクライアントからツールとして呼ばれる MCP サーバー
 
@@ -14,13 +15,16 @@ pub mod check;
 pub mod command;
 pub mod config;
 pub mod daemon;
+pub mod dates;
 pub mod error;
 pub mod frontmatter;
 pub mod init;
 pub mod markdown;
 pub mod mcp;
 pub mod normalize;
+pub mod ranges;
 pub mod search;
+pub mod sections;
 pub mod selector;
 pub mod textindex;
 

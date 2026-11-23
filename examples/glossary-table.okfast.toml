@@ -25,3 +25,17 @@ short_max = 3
 [search]
 # 文字起こし・README・辞書そのものは既定で除く（--all で含める）
 exclude = ["references/transcripts/**", "README.md", "glossary/別名表.md"]
+# okfast search（読む範囲を返す検索）: 範囲の見出しに出す frontmatter の値
+show_keys = ["credibility"]
+
+# 行の日付の取り方（新しい記録を足す・--since・--sort date）。先に書いたものから探す
+[search.recent]
+count         = 4
+date_sources  = ["table_row", "frontmatter:date", "footnote_source", "heading"]
+table_columns = ["日付"]
+
+# 関連度によらず必ず出す範囲
+[search.must_read]
+topics   = 2
+headings = ["未決", "矛盾"]
+pages    = [{ path = "decisions/*.md", top = 3 }]

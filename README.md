@@ -4,7 +4,7 @@
 
 okfast は OKF 0.2 形式のデータを、読み込み・検証・変換・書き出しまで可能な限り高速に処理することを目的としたライブラリ兼 CLI です。
 
-> ステータス: 開発初期。実装済みは、同義語による言い換えつきの検索（`okfast grep` / `okfast aliases`）、それを速く答える常駐プロセス、AI のクライアントから直接呼べる MCP サーバー（`okfast mcp`）、検索の設定を作る・確かめる道具（`okfast config`）。API は予告なく変わります。
+> ステータス: 開発初期。実装済みは、同義語による言い換えつきの検索（`okfast grep` / `okfast aliases`）、読む範囲（見出しの節）を BM25 の順位で返す検索（`okfast search`）、それを速く答える常駐プロセス、AI のクライアントから直接呼べる MCP サーバー（`okfast mcp`）、検索の設定を作る・確かめる道具（`okfast config`）。API は予告なく変わります。
 
 ## 目標
 
@@ -81,6 +81,7 @@ okfast -b <root> grep -c WP / grep -l WP              # ページごとの行数
 okfast -b <root> grep -C 2 -m 20 WP                   # 前後 2 行つき、1 ページ 20 行まで
 okfast -b <root> grep --full WP                       # 上限なしですべて出す
 okfast -b <root> grep --json WP                       # 1 行の JSON で出す（プログラム・試験用）
+okfast -b <root> search "Widget Pro" 価格              # 読む範囲（見出しの節）を関連度の順に返す（下の「読む範囲を返す検索」）
 okfast -b <root> aliases "Widget Pro" [--json]        # 何に言い換えられるかだけを表示する
 okfast -b <root> config init > okfast.toml           # バンドルを走査して設定の下書きを作る
 okfast -b <root> config check                        # 設定をバンドルに当てて確かめる（警告なしで終了コード 0）
@@ -112,9 +113,62 @@ okfast -b <root> mcp                                 # MCP サーバーとして
 - `terms[].lines` は語ごとの当たった行の数、`terms` はそのページで当たった語の種類の数、`boosted` は主題のページ
 - `-C`・`-c`・`-l`・`--pages` とは一緒に使えません。`--max-chars` は使いません
 
+### 読む範囲を返す検索（`okfast search`）
+
+`grep` は当たった行を返し、どこからどこまでを Read するかは AI が決めます。けれども、答えの行そのものには検索語が入っていないことが多く（同じ節の別の行に語がある）、当たった行の周りだけを読むと取りこぼします。`search` は、結果を **読む範囲（ページ:開始行-終了行）** で返します。
+
+```sh
+okfast -b <root> search "Widget Pro" 価格          # 関連度の上位 8 範囲（1 ページ 2 範囲まで）
+okfast -b <root> search -n 5 --per-page 1 価格     # 上位 5 範囲、1 ページ 1 範囲まで
+okfast -b <root> search --since 2026-01-01 価格    # その日以降の日付の範囲だけ
+okfast -b <root> search --sort date 価格           # 日付の新しい順
+okfast -b <root> search --recent 0 価格            # 新しい記録を足さない
+okfast -b <root> search --json 価格                # 1 行の JSON
+```
+
+```text
+# search: Widget Pro ／ 価格
+# 当たり: 12 行・6 範囲 / 3 ページ（検索 40 ページ）
+## 必ず読む範囲（見出しや決まったページで選んだもの。関連度によらない）
+notes/widget.md:18-21［§未決｜credibility: A］
+  （語の当たりはない）
+## 関連度の上位
+notes/widget.md:10-16［2026-03-02｜§価格｜credibility: A］
+  10: ## 価格
+  11: 価格は次のとおり。
+## 新しい記録（関連度の上位に入らなかったもの）
+notes/meeting.md:6-7［2026-04-01｜§議題］
+  7: WP の価格について、値下げの声が出た。
+# ほかの範囲（順位順）: notes/a.md:3-9, …
+```
+
+- **結果の単位は節**です。節は見出し（`#`〜`######`）の行から次の見出しの手前まで。答えの行に語がなくても、同じ節に当たりがあれば範囲に入ります。40 行（`[search.sections] max_lines`）を超える節は、当たった行の前後 4 行（`window`）だけを切り出し、`節 a-b の一部` と示します
+- **順位は BM25** です。行を 1 つの文書とみなし、ありふれた語は軽く、珍しい語は重く、短い行ほど重く数えます（行の中の回数は数えない）。範囲の点は、語ごとに範囲の中で最も高い行の点を足したもの。並びは、主題のページ（辞書の boost）→ 範囲に当たった語の種類が多い → 題名に当たったページ → 点、の順です
+- **新しい記録**: 上位のあとに、日付の新しい範囲を 4 件（`[search.recent] count`）足します。行の日付をどこから取るか（表の行頭・frontmatter・脚注の出典・見出し）は `date_sources` で宣言します。宣言がなければ足しません
+- **必ず読む範囲**: 主題のページの上位 2 件（`[search.must_read] topics`）で、見出しが設定の語（`headings`）に当たる節を、関連度によらず先頭に出します。決まったページ（`pages`）の上位の範囲も足せます
+- 範囲の見出しの `［…］` には、日付・`§見出し`・`[search] show_keys` に書いた frontmatter の値が入ります
+- 抜粋は点の高い当たった行 2 行です。範囲は Read の `offset` = 開始行、`limit` = 終了行 - 開始行 + 1 で読みます
+- 終了コードは、範囲ありが 0、なしが 1、エラーが 2 です
+
+設定の書き方は [docs/config.md](docs/config.md) の `[search.sections]`・`[search.recent]`・`[search.must_read]` にあります。
+
+`search --json` は、範囲ごとの当たった行と点を返します。バンドル側のスクリプトが、ここに独自の情報を足して表示することを想定しています。
+
+```json
+{"terms":[{"term":"価格","added":[],"conditional":[],"boost":[],"lines":4}],
+ "total_lines":4,"total_ranges":3,"total_pages":2,"searched":2,"excluded":0,"exclude":[],
+ "ranges":[{"rel":"notes/widget.md","from":10,"to":16,"title":"Widget Pro","heading":"価格","section":[10,16],"partial":false,
+            "date":"2026-03-02","meta":{"credibility":"A"},"score":2.019,"terms":1,"boosted":false,"must":false,"recent":false,
+            "hits":[{"line":10,"text":"## 価格","score":2.019,"date":null}]}],
+ "rest":[{"rel":"notes/a.md","from":3,"to":9,"score":0.5,"date":null}]}
+```
+
+- `ranges` は出す範囲を、必ず読む範囲（`must`）→ 上位 → 新しい記録（`recent`）の順に並べます。`rest` は出さなかった範囲（順位順）
+- `section` は節全体の行、`partial` は節の一部を切り出したか、`meta` は `show_keys` の値です。`hits` は範囲の中の当たった行すべて（1 行 300 文字まで）
+
 ### 常駐プロセス
 
-`grep` と `aliases` は、まず常駐プロセスに問い合わせます。常駐プロセスは、バンドルのページ・正規化済みの本文・同義語の辞書をすべてメモリに持ち、ファイルの変更を OS の通知で監視しています。いなければその回は自分で実行し、常駐プロセスを裏で起動します（次の回から速くなります）。
+`grep`・`search`・`aliases` は、まず常駐プロセスに問い合わせます。常駐プロセスは、バンドルのページ・正規化済みの本文・同義語の辞書をすべてメモリに持ち、ファイルの変更を OS の通知で監視しています。いなければその回は自分で実行し、常駐プロセスを裏で起動します（次の回から速くなります）。
 
 - 変更は、問い合わせに答える前にすべて反映します。ページの追加・変更・削除、ディレクトリの追加・名前の変更、`okfast.toml` の変更を、書いた直後の問い合わせから反映します
 - 本文の合計が上限（既定 256 MiB、`OKFAST_DAEMON_MAX_MB`）を超えるバンドルは扱わず、自分で実行します
@@ -145,11 +199,11 @@ OKF 0.2 には同義語の決まりがない（type も frontmatter のキーも
 
 ### MCP サーバー
 
-`okfast -b <root> mcp` で、標準入出力の MCP サーバーとして動きます。AI のクライアント（Claude Code など）は、`grep` と `aliases` をツールとして直接呼べます。
+`okfast -b <root> mcp` で、標準入出力の MCP サーバーとして動きます。AI のクライアント（Claude Code など）は、`grep`・`search`・`aliases` をツールとして直接呼べます。
 
 - シェルを通さないので、呼び出しのたびのシェルの起動・フック・許可の確認がかかりません（Windows では 1 回あたり数秒になることがあります）
 - Bash を持たないエージェント（Read・Grep・Glob だけのものなど）にも、ツールとして渡せます
-- ツールの引数は CLI のオプションと同じ名前です（`terms`、`pages`、`files`、`count`、`json`、`context`、`max_per_page`、`max_pages`、`max_columns`、`max_chars`、`full`、`all`、`no_aliases`）。出力も CLI と同じです
+- ツールの引数は CLI のオプションと同じ名前です（`terms`、`pages`、`files`、`count`、`json`、`context`、`max_per_page`、`max_pages`、`max_columns`、`max_chars`、`full`、`all`、`no_aliases`）。search は `terms`、`top`、`per_page`、`recent`、`since`、`sort`（`relevance` か `date`）、`json`、`all`、`no_aliases`。出力も CLI と同じです
 - 検索は CLI と同じく常駐プロセスを使います（`--no-daemon` を付ければ使いません）。ファイルの変更はすぐに反映します
 
 Claude Code では、バンドルを持つリポジトリの `.mcp.json` に書きます（`okfast` に PATH が通っていなければ、実行ファイルのパスを書きます）。
@@ -162,7 +216,7 @@ Claude Code では、バンドルを持つリポジトリの `.mcp.json` に書�
 }
 ```
 
-ツールは `mcp__okfast__grep`・`mcp__okfast__aliases` という名前になります。`.claude/settings.json` に次のように書くと、確認なしで使わせられ、`.mcp.json` のサーバーを使うかの確認も出ません。
+ツールは `mcp__okfast__grep`・`mcp__okfast__search`・`mcp__okfast__aliases` という名前になります。`.claude/settings.json` に次のように書くと、確認なしで使わせられ、`.mcp.json` のサーバーを使うかの確認も出ません。
 
 ```json
 {
@@ -189,6 +243,7 @@ Claude Code は、何も言わなければ Grep ツール（中身は ripgrep）
 ## ナレッジの検索
 
 - `knowledge/` の中を語で探すときは、Grep ツール・rg・grep を使わず `okfast -b knowledge grep <語>...` を使う（okfast-search スキル）
+- 問いに答えるために読む範囲を決めたいときは `okfast -b knowledge search <語>...` を使う。結果の `パス:開始行-終了行` をそのまま Read する
 - okfast は同義語の辞書で言い換え、表記の揺れを吸収する。自分で同義語を `|` で並べなくてよい
 - Grep を使ってよいのは、正規表現が必要なとき、`.md` 以外のファイルを探すとき、okfast がエラーになったときだけ
 ```
@@ -200,7 +255,7 @@ Claude Code は、何も言わなければ Grep ツール（中身は ripgrep）
 ```json
 {
   "permissions": {
-    "allow": ["Bash(okfast grep:*)", "Bash(okfast aliases:*)", "Bash(okfast -b:*)"]
+    "allow": ["Bash(okfast grep:*)", "Bash(okfast search:*)", "Bash(okfast aliases:*)", "Bash(okfast -b:*)"]
   }
 }
 ```
@@ -227,8 +282,11 @@ src/check.rs        設定の確かめ（okfast config check）
 src/init.rs         設定の下書き（okfast config init）
 src/textindex.rs    検索用に正規化した本文（ページごとに 1 回だけ作る）
 src/search.rs       行単位の検索（memmem / Teddy で当たりそうな行を探し、その行だけ全部の語を確かめる）
-src/command.rs      grep・aliases の実行と出力（CLI と常駐プロセスで共有）
-src/mcp.rs          MCP サーバー（標準入出力の JSON-RPC。ツールは grep・aliases）
+src/sections.rs     本文を見出しで節に分ける（ページごとに 1 回だけ作る）
+src/dates.rs        行の日付の取り出し（設定の date_sources に従う）
+src/ranges.rs       読む範囲を返す検索（節にまとめ、BM25 で順位を付け、新しい記録・必ず読む範囲を足す）
+src/command.rs      grep・search・aliases の実行と出力（CLI と常駐プロセスで共有）
+src/mcp.rs          MCP サーバー（標準入出力の JSON-RPC。ツールは grep・search・aliases）
 src/daemon/         常駐プロセス（mod.rs: 起動と問い合わせ、state.rs: メモリ上の状態と監視、ipc.rs: 接続口、protocol.rs: 形式）
 src/main.rs         CLI
 examples/           設定例・段階ごとの時間計測（timing.rs）

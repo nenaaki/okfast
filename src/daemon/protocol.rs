@@ -3,12 +3,12 @@
 //! 1 回の接続で、要求を 1 つ送り、応答を 1 つ受け取る。
 //! どちらも「長さ（u32 LE）＋中身」の 1 フレーム。中身の文字列・バイト列も「長さ（u32 LE）＋バイト」。
 
-use crate::command::{Command, GrepOptions};
+use crate::command::{Command, GrepOptions, SearchOptions};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// 形式の版。変えたら上げる。
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 const MAGIC_REQ: &[u8; 4] = b"OKFQ";
 const MAGIC_RES: &[u8; 4] = b"OKFR";
 /// 1 フレームの上限（壊れた入力で大きなメモリを取らないため）。
@@ -216,6 +216,30 @@ impl Request {
                         e.strs(terms);
                         e.u8(u8::from(*json));
                     }
+                    Command::Search { terms, opts } => {
+                        e.u8(2);
+                        e.strs(terms);
+                        for b in [opts.no_aliases, opts.all, opts.json, opts.sort_date] {
+                            e.u8(u8::from(b));
+                        }
+                        for n in [opts.top, opts.per_page] {
+                            e.u32(u32::try_from(n).unwrap_or(u32::MAX));
+                        }
+                        match opts.recent {
+                            None => e.u8(0),
+                            Some(n) => {
+                                e.u8(1);
+                                e.u32(u32::try_from(n).unwrap_or(u32::MAX));
+                            }
+                        }
+                        match &opts.since {
+                            None => e.u8(0),
+                            Some(s) => {
+                                e.u8(1);
+                                e.str(s);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -258,6 +282,25 @@ impl Request {
                     1 => Command::Aliases {
                         terms: d.strs()?,
                         json: d.bool()?,
+                    },
+                    2 => Command::Search {
+                        terms: d.strs()?,
+                        opts: SearchOptions {
+                            no_aliases: d.bool()?,
+                            all: d.bool()?,
+                            json: d.bool()?,
+                            sort_date: d.bool()?,
+                            top: d.u32()? as usize,
+                            per_page: d.u32()? as usize,
+                            recent: match d.u8()? {
+                                0 => None,
+                                _ => Some(d.u32()? as usize),
+                            },
+                            since: match d.u8()? {
+                                0 => None,
+                                _ => Some(d.str()?),
+                            },
+                        },
                     },
                     _ => return Err(bad()),
                 };
@@ -350,6 +393,37 @@ mod tests {
                             max_pages: 0,
                             ..GrepOptions::default()
                         },
+                    },
+                },
+            },
+            Request {
+                build_id: "z".into(),
+                body: RequestBody::Run {
+                    root: PathBuf::from("r"),
+                    config: None,
+                    stats: false,
+                    command: Command::Search {
+                        terms: vec!["価格".into()],
+                        opts: SearchOptions {
+                            json: true,
+                            sort_date: true,
+                            recent: Some(0),
+                            since: Some("2026-01-01".into()),
+                            top: 3,
+                            ..SearchOptions::default()
+                        },
+                    },
+                },
+            },
+            Request {
+                build_id: "w".into(),
+                body: RequestBody::Run {
+                    root: PathBuf::from("r"),
+                    config: None,
+                    stats: false,
+                    command: Command::Search {
+                        terms: vec!["a".into()],
+                        opts: SearchOptions::default(),
                     },
                 },
             },

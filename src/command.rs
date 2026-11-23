@@ -3,7 +3,9 @@
 use crate::aliases::Dictionary;
 use crate::bundle::Bundle;
 use crate::config::Config;
+use crate::dates;
 use crate::error::Result;
+use crate::ranges::{self, Kind, RangeOptions};
 use crate::search::{self, Options, Query, Term};
 use std::io::Write;
 
@@ -16,6 +18,13 @@ pub enum Command {
         terms: Vec<String>,
         /// 指定。
         opts: GrepOptions,
+    },
+    /// 読む範囲（見出しの節）を、関連度の順に返す。
+    Search {
+        /// 検索語。
+        terms: Vec<String>,
+        /// 指定。
+        opts: SearchOptions,
     },
     /// 言い換えを表示する。
     Aliases {
@@ -87,6 +96,49 @@ impl Default for GrepOptions {
     }
 }
 
+/// search の出し方。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchOptions {
+    /// 辞書で言い換えない。
+    pub no_aliases: bool,
+    /// exclude を無視する。
+    pub all: bool,
+    /// 結果を 1 つの JSON で出す。
+    pub json: bool,
+    /// 関連度の上位から出す範囲の数（0 は無制限）。
+    pub top: usize,
+    /// 1 ページから出す範囲の数（0 は無制限）。
+    pub per_page: usize,
+    /// 足す新しい記録の数（`None` は設定の `[search.recent] count`）。
+    pub recent: Option<usize>,
+    /// この日付（`YYYY-MM-DD`）より前の範囲を出さない。
+    pub since: Option<String>,
+    /// 日付の新しい順に並べる。
+    pub sort_date: bool,
+}
+
+impl SearchOptions {
+    /// 関連度の上位から出す範囲の数の既定値。
+    pub const TOP: usize = 8;
+    /// 1 ページから出す範囲の数の既定値。
+    pub const PER_PAGE: usize = 2;
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        SearchOptions {
+            no_aliases: false,
+            all: false,
+            json: false,
+            top: Self::TOP,
+            per_page: Self::PER_PAGE,
+            recent: None,
+            since: None,
+            sort_date: false,
+        }
+    }
+}
+
 /// コマンドを実行するための材料。
 #[derive(Debug, Clone, Copy)]
 pub struct Context<'a> {
@@ -105,6 +157,7 @@ pub fn run(cmd: &Command, cx: &Context<'_>, out: &mut impl Write) -> Result<u8> 
     match cmd {
         Command::Aliases { terms, json } => aliases(terms, *json, cx, out),
         Command::Grep { terms, opts } => grep(terms, opts, cx, out),
+        Command::Search { terms, opts } => search_ranges(terms, opts, cx, out),
     }
 }
 
@@ -633,4 +686,349 @@ fn json_str(s: &str) -> String {
 fn json_arr<'a>(v: impl IntoIterator<Item = &'a String>) -> String {
     let items: Vec<String> = v.into_iter().map(|s| json_str(s)).collect();
     format!("[{}]", items.join(","))
+}
+
+fn search_ranges(
+    terms: &[String],
+    o: &SearchOptions,
+    cx: &Context<'_>,
+    out: &mut impl Write,
+) -> Result<u8> {
+    let dict = cx.dict;
+    let cfg = &cx.config.search;
+    let q = Query::parse(terms, (!o.no_aliases).then_some(dict))?;
+    let since = match &o.since {
+        None => None,
+        Some(s) => Some(dates::parse_exact(s).ok_or_else(|| {
+            crate::Error::Query(format!(
+                "--since の「{s}」は日付として読めない（YYYY-MM-DD か YYYY/MM/DD）"
+            ))
+        })?),
+    };
+    if (since.is_some() || o.sort_date) && cfg.recent.date_sources.is_empty() {
+        return Err(crate::Error::Query(
+            "--since・--sort date には、設定の [search.recent] date_sources（行の日付の取り方）が要る"
+                .into(),
+        ));
+    }
+    let opt = RangeOptions {
+        include_all: o.all,
+        short_max: cx.config.aliases.matching.short_max,
+        top: o.top,
+        per_page: o.per_page,
+        recent: o.recent.unwrap_or(cfg.recent.count),
+        since,
+        sort_date: o.sort_date,
+    };
+    let r = ranges::search_ranges(cx.bundle, dict, &q, cfg, &opt)?;
+    let code = if r.ranges.is_empty() { 1 } else { 0 };
+    if o.json {
+        print_ranges_json(&q, &r, cfg, dict, out);
+        return Ok(code);
+    }
+
+    let labels: Vec<&str> = q.terms.iter().map(|t| t.label.as_str()).collect();
+    let _ = writeln!(out, "# search: {}", labels.join(" ／ "));
+    for t in &q.terms {
+        print_expansion(out, t, dict);
+    }
+    for (t, n) in q.terms.iter().zip(&r.lines_per_term) {
+        if *n == 0 {
+            let _ = writeln!(out, "# 「{}」に当たる行はない", t.label);
+        }
+    }
+    if !r.boosted.is_empty() {
+        let _ = writeln!(out, "# 主題のページ（先に表示）: {}", r.boosted.join(", "));
+    }
+    let mut summary = format!(
+        "# 当たり: {} 行・{} 範囲 / {} ページ（検索 {} ページ",
+        r.total_lines,
+        r.total_ranges(),
+        r.total_pages,
+        r.searched
+    );
+    if r.excluded > 0 {
+        summary.push_str(&format!(
+            "、除外 {}: {} — --all で含める",
+            r.excluded,
+            cfg.exclude.join(", ")
+        ));
+    }
+    summary.push('）');
+    let _ = writeln!(out, "{summary}");
+    if !r.dated && opt.recent > 0 {
+        let _ = writeln!(
+            out,
+            "# 行の日付の取り方が設定にないため、新しい記録は足さない（[search.recent] date_sources）"
+        );
+    }
+    if let Some(d) = since {
+        let _ = writeln!(
+            out,
+            "# {} 以降の日付の範囲だけ（日付の分からない範囲は除く。必ず読む範囲は除かない）",
+            dates::format(d)
+        );
+    }
+
+    let groups = [
+        (
+            Kind::Must,
+            "## 必ず読む範囲（見出しや決まったページで選んだもの。関連度によらない）",
+        ),
+        (
+            Kind::Top,
+            if o.sort_date {
+                "## 日付の新しい順"
+            } else {
+                "## 関連度の上位"
+            },
+        ),
+        (
+            Kind::Recent,
+            "## 新しい記録（関連度の上位に入らなかったもの）",
+        ),
+    ];
+    for (kind, title) in groups {
+        let mut items = r.ranges.iter().filter(|x| x.kind == kind).peekable();
+        if items.peek().is_none() {
+            continue;
+        }
+        let _ = writeln!(out, "{title}");
+        for rg in items {
+            print_range(rg, cfg, out);
+        }
+    }
+    if !r.rest.is_empty() {
+        const LIST: usize = 20;
+        let items: Vec<String> = r
+            .rest
+            .iter()
+            .take(LIST)
+            .map(|x| format!("{}:{}-{}", x.rel, x.from, x.to))
+            .collect();
+        let more = if r.rest.len() > LIST {
+            format!("（ほか {}）", r.rest.len() - LIST)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(out, "# ほかの範囲（順位順）: {}{more}", items.join(", "));
+    }
+    if !r.ranges.is_empty() {
+        let _ = writeln!(
+            out,
+            "# 範囲は Read で読む（offset = 開始行、limit = 終了行 - 開始行 + 1）"
+        );
+    }
+    Ok(code)
+}
+
+/// 範囲の見出しに付ける注記（日付・見出し・frontmatter の値・切り出し）。
+fn range_notes(rg: &ranges::Range<'_>, cfg: &crate::config::SearchConfig) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(d) = rg.date {
+        notes.push(dates::format(d));
+    }
+    if let Some(h) = rg.heading.filter(|h| !h.is_empty()) {
+        notes.push(format!("§{h}"));
+    }
+    for k in &cfg.show_keys {
+        if let Some(v) = rg.page.frontmatter().string(k) {
+            notes.push(format!("{k}: {v}"));
+        }
+    }
+    if rg.partial {
+        notes.push(format!("節 {}-{} の一部", rg.section.0, rg.section.1));
+    }
+    notes
+}
+
+/// 範囲の抜粋に出す当たった行の数。
+const RANGE_EXCERPT: usize = 2;
+/// 範囲の抜粋の 1 行の文字数。
+const RANGE_SNIPPET: usize = 160;
+
+/// 1 つの範囲: `パス:開始行-終了行［注記］` と、点の高い当たった行（行の順）。
+fn print_range(rg: &ranges::Range<'_>, cfg: &crate::config::SearchConfig, out: &mut impl Write) {
+    let notes = range_notes(rg, cfg);
+    let mut head = format!("{}:{}-{}", rg.rel, rg.from, rg.to);
+    if !notes.is_empty() {
+        head.push_str(&format!("［{}］", notes.join("｜")));
+    }
+    let _ = writeln!(out, "{head}");
+    if rg.hits.is_empty() {
+        let _ = writeln!(out, "  （語の当たりはない）");
+        return;
+    }
+    let mut best: Vec<&ranges::RangeHit<'_>> = rg.hits.iter().collect();
+    best.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.line.cmp(&b.line)));
+    best.truncate(RANGE_EXCERPT);
+    best.sort_by_key(|h| h.line);
+    for h in best {
+        let _ = writeln!(
+            out,
+            "  {}: {}",
+            h.line,
+            snippet(h.text.trim(), RANGE_SNIPPET)
+        );
+    }
+    if rg.hits.len() > RANGE_EXCERPT {
+        let _ = writeln!(
+            out,
+            "  （ほかに当たった行 {}）",
+            rg.hits.len() - RANGE_EXCERPT
+        );
+    }
+}
+
+/// 結果を 1 行の JSON で出す。書式は README の「search の JSON」。
+fn print_ranges_json(
+    q: &Query,
+    r: &ranges::RangeResult<'_>,
+    cfg: &crate::config::SearchConfig,
+    dict: &Dictionary,
+    out: &mut impl Write,
+) {
+    use serde::Serialize;
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize)]
+    struct Out<'a> {
+        terms: Vec<JTerm<'a>>,
+        total_lines: usize,
+        total_ranges: usize,
+        total_pages: usize,
+        searched: usize,
+        excluded: usize,
+        exclude: &'a [String],
+        ranges: Vec<JRange<'a>>,
+        rest: Vec<JRest<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JTerm<'a> {
+        term: &'a str,
+        added: &'a [String],
+        conditional: Vec<JCond<'a>>,
+        boost: &'a [String],
+        lines: usize,
+    }
+    #[derive(Serialize)]
+    struct JCond<'a> {
+        when: &'a str,
+        names: &'a [String],
+    }
+    #[derive(Serialize)]
+    struct JRange<'a> {
+        rel: &'a str,
+        from: usize,
+        to: usize,
+        title: String,
+        heading: Option<&'a str>,
+        section: [usize; 2],
+        partial: bool,
+        date: Option<String>,
+        meta: BTreeMap<&'a str, String>,
+        score: f64,
+        terms: u32,
+        boosted: bool,
+        must: bool,
+        recent: bool,
+        hits: Vec<JHit<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JHit<'a> {
+        line: usize,
+        text: std::borrow::Cow<'a, str>,
+        score: f64,
+        date: Option<String>,
+    }
+    #[derive(Serialize)]
+    struct JRest<'a> {
+        rel: &'a str,
+        from: usize,
+        to: usize,
+        score: f64,
+        date: Option<String>,
+    }
+    let round = |x: f64| (x * 1000.0).round() / 1000.0;
+
+    let terms = q
+        .terms
+        .iter()
+        .zip(&r.lines_per_term)
+        .map(|(t, &lines)| {
+            let e = &t.expansion;
+            JTerm {
+                term: &t.label,
+                added: &e.added,
+                conditional: e
+                    .conditional
+                    .iter()
+                    .map(|c| JCond {
+                        when: dict.whens()[c.when].description(),
+                        names: &c.names,
+                    })
+                    .collect(),
+                boost: &e.boost,
+                lines,
+            }
+        })
+        .collect();
+    let ranges = r
+        .ranges
+        .iter()
+        .map(|x| JRange {
+            rel: x.rel,
+            from: x.from,
+            to: x.to,
+            title: x.page.title(),
+            heading: x.heading,
+            section: [x.section.0, x.section.1],
+            partial: x.partial,
+            date: x.date.map(dates::format),
+            meta: cfg
+                .show_keys
+                .iter()
+                .filter_map(|k| x.page.frontmatter().string(k).map(|v| (k.as_str(), v)))
+                .collect(),
+            score: round(x.score),
+            terms: x.terms.count_ones(),
+            boosted: x.boosted,
+            must: x.kind == Kind::Must,
+            recent: x.kind == Kind::Recent,
+            hits: x
+                .hits
+                .iter()
+                .map(|h| JHit {
+                    line: h.line,
+                    text: clip(h.text, GrepOptions::MAX_COLUMNS),
+                    score: round(h.score),
+                    date: h.date.map(dates::format),
+                })
+                .collect(),
+        })
+        .collect();
+    let rest = r
+        .rest
+        .iter()
+        .map(|x| JRest {
+            rel: x.rel,
+            from: x.from,
+            to: x.to,
+            score: round(x.score),
+            date: x.date.map(dates::format),
+        })
+        .collect();
+    let v = Out {
+        terms,
+        total_lines: r.total_lines,
+        total_ranges: r.total_ranges(),
+        total_pages: r.total_pages,
+        searched: r.searched,
+        excluded: r.excluded,
+        exclude: if r.excluded > 0 { &cfg.exclude } else { &[] },
+        ranges,
+        rest,
+    };
+    let _ = serde_json::to_writer(&mut *out, &v);
+    let _ = writeln!(out);
 }

@@ -2,6 +2,7 @@
 //!
 //! 同義語の取り出し方はバンドルごとに宣言する。okfast 本体は特定のバンドルの約束を持たない。
 
+use crate::dates::DateSource;
 use crate::error::{Error, Result};
 use crate::selector::{OneOrMany, SelectorSpec};
 use serde::Deserialize;
@@ -148,6 +149,137 @@ pub struct SearchConfig {
     /// 既定で検索しないページ（glob）。`--all` で含める。
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// `search` の範囲の見出しに値を出す frontmatter のキー（例: `["credibility"]`）。
+    #[serde(default)]
+    pub show_keys: Vec<String>,
+    /// `search` の節の切り方。
+    #[serde(default)]
+    pub sections: SectionsConfig,
+    /// `search` で足す新しい記録と、行の日付の取り方。
+    #[serde(default)]
+    pub recent: RecentConfig,
+    /// `search` で必ず出す範囲。
+    #[serde(default)]
+    pub must_read: MustReadConfig,
+}
+
+/// `search` の節の切り方。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SectionsConfig {
+    /// これより長い節は、当たった行の前後だけを範囲にする。
+    #[serde(default = "default_section_max_lines")]
+    pub max_lines: usize,
+    /// 長い節で、当たった行の前後に含める行の数。
+    #[serde(default = "default_window")]
+    pub window: usize,
+    /// 本文（前後の空白を除く）がこの文字数より短い行は、当たりに数えない（見出しの行は数える）。
+    #[serde(default)]
+    pub min_chars: usize,
+}
+
+impl Default for SectionsConfig {
+    fn default() -> Self {
+        SectionsConfig {
+            max_lines: default_section_max_lines(),
+            window: default_window(),
+            min_chars: 0,
+        }
+    }
+}
+
+/// `search` で足す新しい記録と、行の日付の取り方。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecentConfig {
+    /// 関連度の上位のあとに足す、日付の新しい範囲の数。
+    #[serde(default = "default_recent_count")]
+    pub count: usize,
+    /// 行の日付の取り出し元（先に書いたものから探す）。空なら日付を使わない。
+    #[serde(default)]
+    pub date_sources: Vec<String>,
+    /// `table_row` で、1 列目より先に見る列の名前。
+    #[serde(default)]
+    pub table_columns: Vec<String>,
+}
+
+impl Default for RecentConfig {
+    fn default() -> Self {
+        RecentConfig {
+            count: default_recent_count(),
+            date_sources: Vec::new(),
+            table_columns: Vec::new(),
+        }
+    }
+}
+
+impl RecentConfig {
+    /// 日付の取り出し元（読めないものは設定を読むときにエラーにしてある）。
+    pub fn sources(&self) -> Vec<DateSource> {
+        self.date_sources
+            .iter()
+            .filter_map(|s| DateSource::parse(s))
+            .collect()
+    }
+}
+
+/// `search` で必ず出す範囲。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MustReadConfig {
+    /// 見出しを探す主題のページの数（順位の上から）。
+    #[serde(default = "default_must_topics")]
+    pub topics: usize,
+    /// 見出しにこの語のどれかを含む節を、必ず出す。
+    #[serde(default)]
+    pub headings: Vec<String>,
+    /// 必ず出す節の行数の上限（超えたら先頭から）。
+    #[serde(default = "default_must_max_lines")]
+    pub max_lines: usize,
+    /// 決まったページで、当たった範囲の上位を必ず出す。
+    #[serde(default)]
+    pub pages: Vec<MustReadPage>,
+}
+
+impl Default for MustReadConfig {
+    fn default() -> Self {
+        MustReadConfig {
+            topics: default_must_topics(),
+            headings: Vec::new(),
+            max_lines: default_must_max_lines(),
+            pages: Vec::new(),
+        }
+    }
+}
+
+/// 当たった範囲の上位を必ず出すページ。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MustReadPage {
+    /// ページの glob。`exclude` に当たるページでもよい。
+    pub path: String,
+    /// 出す範囲の数。
+    #[serde(default = "default_must_page_top")]
+    pub top: usize,
+}
+
+fn default_section_max_lines() -> usize {
+    40
+}
+fn default_window() -> usize {
+    4
+}
+fn default_recent_count() -> usize {
+    4
+}
+fn default_must_topics() -> usize {
+    2
+}
+fn default_must_max_lines() -> usize {
+    60
+}
+fn default_must_page_top() -> usize {
+    3
 }
 
 fn default_split() -> Vec<String> {
@@ -163,10 +295,22 @@ fn default_short_max() -> usize {
 impl Config {
     /// 文字列から読む。
     pub fn parse(src: &str, path: Option<&Path>) -> Result<Self> {
-        toml::from_str(src).map_err(|e| Error::Config {
+        let err = |message: String| Error::Config {
             path: path.map(Path::to_path_buf),
-            message: e.to_string(),
-        })
+            message,
+        };
+        let c: Config = toml::from_str(src).map_err(|e| err(e.to_string()))?;
+        for s in &c.search.recent.date_sources {
+            if DateSource::parse(s).is_none() {
+                return Err(err(format!(
+                    "[search.recent] date_sources の「{s}」は読めない（table_row・frontmatter:<キー>・footnote_source・heading のどれか）"
+                )));
+            }
+        }
+        for p in &c.search.must_read.pages {
+            crate::selector::compile_glob(&p.path)?;
+        }
+        Ok(c)
     }
 
     /// ファイルから読む。

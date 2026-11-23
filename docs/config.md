@@ -99,6 +99,52 @@ pages = { type = "Term", category = ["用語", "別名"] }  # キーどうしは
 | キー | 既定値 | 意味 |
 |---|---|---|
 | `exclude` | `[]` | 既定で検索しないページの glob。`okfast grep --all` で含める。辞書のページそのもの（どの語でも当たる）を入れておくとよい |
+| `show_keys` | `[]` | `okfast search` の範囲の見出しに値を出す frontmatter のキー（例: `["credibility"]`）。JSON では `meta` に入る |
+
+以下の 3 つは `okfast search`（読む範囲を返す検索）だけが使います。
+
+### `[search.sections]` — 節の切り方
+
+節は、見出し（`#`〜`######`）の行から次の見出し（レベルを問わない）の手前までです。最初の見出しより前の本文は、見出しなしの節になります。
+
+| キー | 既定値 | 意味 |
+|---|---|---|
+| `max_lines` | `40` | これより長い節は、当たった行の前後だけを範囲にする（重なる・隣り合うものはつなぐ） |
+| `window` | `4` | 長い節で、当たった行の前後に含める行の数 |
+| `min_chars` | `0` | 本文（前後の空白を除く）がこの文字数より短い行は、当たりに数えない。見出しの行は短くても数える |
+
+### `[search.recent]` — 新しい記録と、行の日付の取り方
+
+関連度の上位のあとに、日付の新しい範囲を足します。新しい記録が、語の少なさで上位から落ちないようにするためです。`--since`・`--sort date` もこの日付を使います。
+
+| キー | 既定値 | 意味 |
+|---|---|---|
+| `count` | `4` | 足す範囲の数（`okfast search --recent N` で変えられる） |
+| `date_sources` | `[]` | 行の日付の取り出し元。先に書いたものから探し、最初に見つかった日付をその行の日付にする。**空なら日付を使わない**（新しい記録は足さず、`--since`・`--sort date` はエラー） |
+| `table_columns` | `[]` | `table_row` で、1 列目より先に見る列の見出し（完全一致） |
+
+`date_sources` に書けるもの:
+
+| 値 | 日付 |
+|---|---|
+| `table_row` | 表のデータ行の 1 列目（と `table_columns` の列）のセル |
+| `frontmatter:<キー>` | ページの frontmatter のキーの値（ページのすべての行に効く。例: `frontmatter:date`） |
+| `footnote_source` | 行が参照する脚注 `[^id]` の定義の本文（出典のパス・題名）。リンク先のページは開かない |
+| `heading` | 行が属する見出しと、その親の見出しのうち、いちばん近い日付つきのもの |
+
+- 日付の書式は `YYYY-MM-DD` と `YYYY/MM/DD`（月・日は 1 桁も可）だけ。前後が数字のもの、ありえない月日は日付にしない。1 つのセル・文字列に複数あれば最も新しいもの
+- 範囲の日付は、範囲の行の日付のうち最も新しいもの。日付の分からない範囲は、新しい記録と `--since` の候補にしない
+
+### `[search.must_read]` — 必ず読む範囲
+
+関連度によらず、結果の先頭に出す範囲です。未決・矛盾などの節は問いの語が少なく、関連度の上位に入りにくいためです。
+
+| キー | 既定値 | 意味 |
+|---|---|---|
+| `topics` | `2` | 見出しを探す主題のページの数。主題のページは、辞書の `boost` のリンク先と、題名に語が当たったページ（grep の順位の上から） |
+| `headings` | `[]` | 見出しにこの語のどれかを含む節を出す（正規化して部分一致） |
+| `max_lines` | `60` | 出す節の行数の上限（超えたら先頭から） |
+| `pages` | `[]` | `{ path = "<glob>", top = 3 }` の並び。当たったページのうち path に当たるものから、点の高い範囲を `top` 件出す。`exclude` に当たるページでもよい（決定の一覧などを既定の検索から除いたまま使える） |
 
 ## 例
 
@@ -124,7 +170,16 @@ key   = "credibility"
 allow = ["A", "B"]
 
 [search]
-exclude = ["glossary/別名表.md", "references/transcripts/**"]
+exclude   = ["glossary/別名表.md", "references/transcripts/**", "decisions/**"]
+show_keys = ["credibility"]
+
+[search.recent]
+date_sources  = ["table_row", "frontmatter:date", "footnote_source", "heading"]
+table_columns = ["日付"]
+
+[search.must_read]
+headings = ["未決", "矛盾", "未確認"]
+pages    = [{ path = "decisions/*.md", top = 3 }]
 ```
 
 この設定が読む表（`glossary/別名表.md`）:
@@ -158,3 +213,5 @@ aliases: [WP, ウィジェットプロ]
 | 短い語 | 略語はほかの意味でも当たりやすい（例: 単位の MB）。誤って当たるなら呼び名から外す |
 | when に当たるページがない | 条件付きの列が一度も使われない。`when` の path を直す |
 | trust で除いたページ | 辞書のページに trust のキーがない。キーを書くか、trust を外す |
+| 日付の取れた行がない（[search.recent]） | `date_sources` の取り出し元に、日付が書かれていない。check が示す内訳と、`config init` の提案を見る |
+| must_read の path に当たるページがない | `[search.must_read] pages` の glob が違う。`index.md`・`log.md` は OKF の予約名でページにならない |
