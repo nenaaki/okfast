@@ -35,7 +35,8 @@ jobs:
       - name: package
         shell: bash
         run: |
-          name="okfast-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          # 手動実行ではブランチ名（ci/foo など）になるので、/ を - にする
+          name="okfast-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md LICENSE "$name/"
           cp -r skills "$name/"
