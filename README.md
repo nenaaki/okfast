@@ -229,7 +229,7 @@ Claude Code では、バンドルを持つリポジトリの `.mcp.json` に書�
 
 ### AI に使わせる（Grep より優先させる）
 
-Claude Code は、何も言わなければ Grep ツール（中身は ripgrep）でファイルを探します。okfast を優先させるには、バンドルを持つリポジトリで次の 3 つを行います。MCP サーバーを使う場合は、2 の「`okfast -b knowledge grep`」を「okfast の MCP ツール（`mcp__okfast__grep`）」に読み替え、3 は上の `mcp__okfast` の許可にします。
+Claude Code は、何も言わなければ Grep ツール（中身は ripgrep）でファイルを探します。okfast を優先させるには、バンドルを持つリポジトリで次の 3 つを行います。MCP サーバーを使う場合は、2 の「`okfast -b knowledge grep`」「`okfast -b knowledge search`」を「okfast の MCP ツール（`mcp__okfast__grep`・`mcp__okfast__search`）」に読み替え、3 は上の `mcp__okfast` の許可にします。
 
 **1. スキルを置く**
 

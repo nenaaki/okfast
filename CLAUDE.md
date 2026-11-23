@@ -32,7 +32,7 @@ cargo build --profile profiling   # release 最適化 + デバッグシンボル
 
 - モジュールの役割は README の「ディレクトリ構成」。同義語の設定の書式の正本は `docs/config.md`（バイナリに埋め込んで `okfast config reference` で出す）
 - 設定のキーを足す・変えるときは、`docs/config.md`・`check.rs`（診断）・`init.rs`（下書き）・`skills/okfast-config/SKILL.md` もそろえる。`tests/config_tools.rs` の `reference_documents_every_key` に新しいキーを足す
-- grep・aliases のオプションや出力を変えるときは、`skills/okfast-search/SKILL.md` と README の「AI に使わせる」もそろえる。MCP のツールの引数（`src/mcp.rs` の `tools` と `grep_options`）も CLI のオプションと同じ名前でそろえ、`tests/mcp.rs` で CLI と同じ出力になることを確かめる
+- grep・search・aliases のオプションや出力を変えるときは、`skills/okfast-search/SKILL.md` と README（「使い方」「読む範囲を返す検索」「AI に使わせる」）もそろえる。MCP のツールの引数（`src/mcp.rs` の `tools` と `grep_options`・`search_options`）も CLI のオプションと同じ名前でそろえ、`tests/mcp.rs` で CLI と同じ出力になることを確かめる
 - **リポジトリ（コード・コメント・テスト・ドキュメント・設定例）に、実在のプロジェクト名・顧客名・そのデータ由来の語を書かない。** 例は架空のもの（Widget Pro など）にする。実データでの確認はローカルだけで行う
 - 設定例は `examples/glossary-table.okfast.toml`
 - 段階ごとの時間: `cargo run --release --example timing -- <bundle> <config> <語>...`（キャッシュなし・初回・2 回目の読み込みと検索）。CLI では `--stats`

@@ -1,4 +1,4 @@
-//! `grep` と `aliases` の実行と出力。CLI と常駐プロセスで共有する。
+//! `grep`・`search`・`aliases` の実行と出力。CLI と常駐プロセスで共有する。
 
 use crate::aliases::Dictionary;
 use crate::bundle::Bundle;

@@ -1,4 +1,4 @@
-//! MCP サーバー: ツールの出力が CLI の grep・aliases と同じであること。
+//! MCP サーバー: ツールの出力が CLI の grep・search・aliases と同じであること。
 
 use serde_json::Value;
 use std::io::Write;
