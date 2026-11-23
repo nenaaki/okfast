@@ -3,7 +3,9 @@
 
 use okfast::aliases::Dictionary;
 use okfast::bundle::{Bundle, CacheMode};
+use okfast::command::SearchOptions;
 use okfast::config::Config;
+use okfast::ranges::{RangeOptions, search_ranges};
 use okfast::search::{Options, Query, search};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -40,9 +42,20 @@ fn main() {
         exclude: cfg.search.exclude.clone(),
         include_all: false,
         short_max: cfg.aliases.matching.short_max,
+        ..Default::default()
     };
     let (first_t, _) = best(1, || search(&bundle, &dict, &q, &opt).unwrap());
     let (search_t, r) = best(5, || search(&bundle, &dict, &q, &opt).unwrap());
+    let ropt = RangeOptions {
+        short_max: cfg.aliases.matching.short_max,
+        top: SearchOptions::TOP,
+        per_page: SearchOptions::PER_PAGE,
+        recent: cfg.search.recent.count,
+        ..Default::default()
+    };
+    let (ranges_t, rr) = best(5, || {
+        search_ranges(&bundle, &dict, &q, &cfg.search, &ropt).unwrap()
+    });
     let index_bytes: usize = bundle
         .pages
         .iter()
@@ -67,5 +80,6 @@ fn main() {
         r.total_lines(),
         index_bytes as f64 / 1e6
     );
+    println!("search_ranges ({} ranges)  {ranges_t:?}", rr.total_ranges());
     let _ = std::fs::remove_dir_all(&cache_dir);
 }

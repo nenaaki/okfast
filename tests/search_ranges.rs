@@ -71,12 +71,13 @@ fn section_is_the_unit() {
     assert_eq!(spans(&v), vec![("a.md".into(), 7, 10)]);
     let r = &v["ranges"][0];
     assert_eq!(r["heading"], "価格");
+    assert_eq!(r["headings"], serde_json::json!(["概要", "価格"]));
     assert_eq!(r["partial"], false);
     assert_eq!(r["hits"].as_array().unwrap().len(), 2);
 
     let (code, text) = run(&root, "", &["価格"], SearchOptions::default());
     assert_eq!(code, 0);
-    assert!(text.contains("a.md:7-10［§価格］"), "{text}");
+    assert!(text.contains("a.md:7-10［§概要 > 価格］"), "{text}");
     let (code, _) = run(&root, "", &["存在しない"], SearchOptions::default());
     assert_eq!(code, 1);
     let _ = std::fs::remove_dir_all(&root);
@@ -327,7 +328,7 @@ fn must_read_sections_and_pages() {
     let (_, text) = run(&root, cfg, &["Widget"], SearchOptions::default());
     assert!(text.contains("## 必ず読む範囲"), "{text}");
     assert!(
-        text.contains("notes/widget.md:8-9［§未決事項｜credibility: A］"),
+        text.contains("notes/widget.md:8-9［§概要 > 未決事項｜credibility: A］"),
         "{text}"
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -370,4 +371,218 @@ fn config_rejects_unknown_date_source() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn topic_pages_raise_scores_instead_of_coming_first() {
+    // 「Widget」はありふれた語で、題名に当たるページは widget.md だけ。3 語すべてが当たる節が上に来る
+    let mut widget = "---\ntype: Product\ntitle: Widget\n---\n".to_string();
+    for i in 0..6 {
+        widget.push_str(&format!("# 節 {i}\nWidget の説明 {i}。\n"));
+    }
+    let mut pages = vec![("widget.md".to_string(), widget)];
+    for i in 0..10 {
+        pages.push((
+            format!("other{i}.md"),
+            format!("{FM}# 雑記\nWidget の話 {i}。\n"),
+        ));
+    }
+    pages.push((
+        "deal.md".into(),
+        format!("{FM}# 商談\nWidget の保守契約の更新期限は月末。\n"),
+    ));
+    let refs: Vec<(&str, &str)> = pages
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let root = bundle_dir("topic", &refs);
+    let v = json(
+        &root,
+        "",
+        &["Widget", "保守契約", "更新期限"],
+        SearchOptions::default(),
+    );
+    assert_eq!(v["ranges"][0]["rel"], "deal.md", "{v}");
+    assert_eq!(v["topics"][0]["rel"], "widget.md");
+    let share = v["topics"][0]["topic"].as_f64().unwrap();
+    assert!(share > 0.0 && share < 0.5, "{share}");
+    // 題名の当たりは点を上げる: 本文が同じなら主題のページの範囲が上
+    let o = json(&root, "", &["Widget"], SearchOptions::default());
+    assert_eq!(o["ranges"][0]["rel"], "widget.md", "{o}");
+    assert_eq!(o["ranges"][0]["topic"], 1.0);
+    assert_eq!(o["topics"][0]["topic"], 1.0);
+
+    // topic_keys で説明・タグのキーも主題の判定に使う
+    let root2 = bundle_dir(
+        "topickeys",
+        &[
+            (
+                "a.md",
+                "---\ntype: Note\ndescription: 保守契約のまとめ\ntags: [契約]\n---\n# 本文\n保守契約の話。\n",
+            ),
+            ("b.md", &format!("{FM}# 本文\n保守契約の話。\n")),
+        ],
+    );
+    let v = json(&root2, "", &["保守契約"], SearchOptions::default());
+    assert_eq!(v["topics"].as_array().unwrap().len(), 0, "{v}");
+    let cfg = "[search]\ntopic_keys = [\"title\", \"description\", \"tags\"]\n";
+    let v = json(&root2, cfg, &["保守契約"], SearchOptions::default());
+    assert_eq!(v["topics"][0]["rel"], "a.md", "{v}");
+    assert_eq!(v["ranges"][0]["rel"], "a.md");
+    let v = json(&root2, cfg, &["契約"], SearchOptions::default());
+    assert_eq!(v["topics"][0]["rel"], "a.md", "{v}");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&root2);
+}
+
+#[test]
+fn footnote_definitions_and_link_targets_are_not_hits() {
+    let body = format!(
+        "{FM}# 本文\n導入の時期は未定[^m1]。\n\n# 関連\n- [議事録](/meetings/price-review.md)\n- [価格表](/price.md)\n\n\
+[^m1]: meetings/2026-01-15 価格の検討会.md\n"
+    );
+    let root = bundle_dir("footnote", &[("a.md", &body)]);
+    let v = json(&root, "", &["価格"], SearchOptions::default());
+    let hits: Vec<u64> = v["ranges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|r| r["hits"].as_array().unwrap().iter())
+        .map(|h| h["line"].as_u64().unwrap())
+        .collect();
+    // 9 行目（[価格表]）の表示の文字だけが当たる。脚注の定義（11 行目）は当たらない
+    assert_eq!(hits, vec![9], "{v}");
+    // 行き先（/price.md・price-review）だけに当たる語は数えない
+    let v = json(&root, "", &["price"], SearchOptions::default());
+    assert_eq!(v["ranges"].as_array().unwrap().len(), 0, "{v}");
+    // skip_footnotes = false なら脚注の定義も数える
+    let v = json(
+        &root,
+        "[search.sections]\nskip_footnotes = false\n",
+        &["価格"],
+        SearchOptions::default(),
+    );
+    assert_eq!(v["total_lines"], 2, "{v}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn decay_rewards_sections_with_many_hits() {
+    // a.md は語が 3 行に当たる節、b.md は 1 行だけ当たる短い節（1 行の点は b.md が高い）
+    let root = bundle_dir(
+        "decay",
+        &[
+            (
+                "a.md",
+                &format!(
+                    "{FM}# 手順\n変更の申請を出す。\n\
+変更の承認を受ける。\n変更を反映する。\n"
+                ),
+            ),
+            ("b.md", &format!("{FM}# 雑記\n変更あり\n")),
+        ],
+    );
+    let v = json(&root, "", &["変更"], SearchOptions::default());
+    assert_eq!(v["ranges"][0]["rel"], "a.md", "{v}");
+    let v = json(
+        &root,
+        "[search.sections]\nscore = \"max\"\n",
+        &["変更"],
+        SearchOptions::default(),
+    );
+    assert_eq!(v["ranges"][0]["rel"], "b.md", "{v}");
+    assert!(Config::parse("[search.sections]\nscore = \"sum\"\n", None).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn must_read_page_window() {
+    let mut log = format!("{FM}# 決定\n| 日付 | 決定 |\n|---|---|\n");
+    for i in 0..8 {
+        log.push_str(&format!("| 2026-03-0{} | Widget の決定 {i} |\n", i + 1));
+    }
+    let root = bundle_dir("mustwindow", &[("decisions/list.md", &log)]);
+    let cfg = "[search.must_read]\npages = [{ path = \"decisions/*.md\", top = 3, window = 0 }]\n";
+    let v = json(&root, cfg, &["Widget"], SearchOptions::default());
+    let must: Vec<(u64, u64)> = v["ranges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["must"] == true)
+        .map(|r| (r["from"].as_u64().unwrap(), r["to"].as_u64().unwrap()))
+        .collect();
+    // 隣り合う行もつながず、1 行ずつ 3 件
+    assert_eq!(must.len(), 3, "{v}");
+    assert!(must.iter().all(|(a, b)| a == b), "{must:?}");
+    // window を省くと [search.sections] の切り方（短い節は節全体）
+    let cfg = "[search.must_read]\npages = [{ path = \"decisions/*.md\", top = 3 }]\n";
+    let v = json(&root, cfg, &["Widget"], SearchOptions::default());
+    assert_eq!(v["ranges"][0]["from"], 4);
+    assert_eq!(v["ranges"][0]["to"], 14);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn path_limits_pages_and_includes_excluded() {
+    let root = bundle_dir(
+        "path",
+        &[
+            ("notes/a.md", &format!("{FM}# A\n価格 a\n")),
+            ("meetings/m.md", &format!("{FM}# M\n価格 m\n")),
+            ("transcripts/t.md", &format!("{FM}# T\n価格 t\n")),
+        ],
+    );
+    let cfg = "[search]\nexclude = [\"transcripts/**\"]\n";
+    let rels = |v: &Value| {
+        let mut r: Vec<String> = spans(v).into_iter().map(|s| s.0).collect();
+        r.sort();
+        r
+    };
+    let v = json(&root, cfg, &["価格"], SearchOptions::default());
+    assert_eq!(rels(&v), vec!["meetings/m.md", "notes/a.md"]);
+    let v = json(
+        &root,
+        cfg,
+        &["価格"],
+        SearchOptions {
+            paths: vec!["meetings/**".into(), "transcripts/**".into()],
+            ..SearchOptions::default()
+        },
+    );
+    assert_eq!(rels(&v), vec!["meetings/m.md", "transcripts/t.md"]);
+    assert_eq!(v["searched"], 2);
+    assert_eq!(
+        v["paths"],
+        serde_json::json!(["meetings/**", "transcripts/**"])
+    );
+    let (_, text) = run(
+        &root,
+        cfg,
+        &["価格"],
+        SearchOptions {
+            paths: vec!["meetings/**".into()],
+            ..SearchOptions::default()
+        },
+    );
+    assert!(text.contains("--path meetings/**"), "{text}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn year_less_table_dates_use_generated_at() {
+    let page = "---\ntype: Log\ngenerated: { by: human:someone, at: 2027-01-10T09:00:00Z }\n---\n\
+# 記録\n| 日 | 内容 |\n|---|---|\n| 12-20 | 価格の話、ほかにも長い説明が続いている |\n\
+| 01-05 | 価格の話、ほかにも長い説明が続いている |\n";
+    let root = bundle_dir("yearless", &[("history.md", page)]);
+    let cfg = "[search.recent]\ndate_sources = [\"table_row\"]\n";
+    let v = json(&root, cfg, &["価格"], SearchOptions::default());
+    let dates: Vec<&str> = v["ranges"][0]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["date"].as_str().unwrap())
+        .collect();
+    assert_eq!(dates, vec!["2026-12-20", "2027-01-05"], "{v}");
+    assert_eq!(v["ranges"][0]["date"], "2027-01-05");
+    let _ = std::fs::remove_dir_all(&root);
 }

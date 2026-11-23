@@ -11,7 +11,7 @@ OKF バンドルの中を探すときは、Grep ツールや `rg`・`grep` で�
 - 全角半角・大文字小文字・空白の違いを無視して当てる
 - 常駐プロセスが全ページをメモリに持っているので、ripgrep より速い（初回だけ少し遅い）
 
-okfast の MCP ツール（`mcp__okfast__grep`・`mcp__okfast__search`・`mcp__okfast__aliases`）が使えるなら、シェルの `okfast` コマンドより先にそちらを使う（シェルを通さないぶん速い）。引数は下のオプションと同じ名前（`terms` に語の配列、`pages`・`context`・`max_per_page`、search は `top`・`per_page`・`since`・`sort` など）で、出力も同じ。
+okfast の MCP ツール（`mcp__okfast__grep`・`mcp__okfast__search`・`mcp__okfast__aliases`）が使えるなら、シェルの `okfast` コマンドより先にそちらを使う（シェルを通さないぶん速い）。引数は下のオプションと同じ名前（`terms` に語の配列、`pages`・`context`・`max_per_page`、search は `top`・`per_page`・`since`・`sort`・`path` など）で、出力も同じ。
 
 ## 使い方
 
@@ -63,13 +63,15 @@ okfast -b <root> search 語1 語2 ...        # 関連度の上位 8 範囲（1 �
 okfast -b <root> search -n 4 語            # 上位を減らす（--per-page で 1 ページの範囲の数）
 okfast -b <root> search --since 2026-01-01 語   # その日以降の日付の範囲だけ
 okfast -b <root> search --sort date 語     # 日付の新しい順（「最新の」「いちばん新しい決定は」など）
+okfast -b <root> search --path "meetings/**" 語   # その層（ディレクトリ）だけ。既定で除くページも、ここで挙げれば含める
 ```
 
 ```text
+# 主題のページ（点を上げる）: notes/widget.md   ← 題名などに語が入るページ。範囲の点が上がっている
 ## 必ず読む範囲（見出しや決まったページで選んだもの。関連度によらない）
-notes/widget.md:18-21［§未決｜credibility: A］   ← 未決・矛盾など、設定で決めた見出しの節
+notes/widget.md:18-21［§概要 > 未決｜credibility: A］   ← 未決・矛盾など、設定で決めた見出しの節
 ## 関連度の上位
-notes/widget.md:10-16［2026-03-02｜§価格｜credibility: A］   ← パス:開始行-終了行［日付｜§見出し｜frontmatter の値］
+notes/widget.md:10-16［2026-03-02｜§概要 > 価格｜credibility: A］   ← パス:開始行-終了行［日付｜§親 > 見出し｜frontmatter の値］
   10: ## 価格                                   ← 点の高い当たった行 2 行
   11: 価格は次のとおり。
 ## 新しい記録（関連度の上位に入らなかったもの）
@@ -79,6 +81,8 @@ notes/widget.md:10-16［2026-03-02｜§価格｜credibility: A］   ← パス:�
 - **「必ず読む範囲」は読み飛ばさない。** 未決・矛盾・決定の一覧など、答えを覆しうる節が入っている
 - 「新しい記録」は、関連度では下でも日付が新しい範囲。古い記録と食い違えば、新しい方を答えにし、食い違いがあることも伝える
 - `節 a-b の一部` は、長い節から当たった行の前後だけを切り出したもの。足りなければ節全体（a-b）を読む
+- 順位は点の高い順。何行にもわたって語が当たる節、全部の語が題名などに入るページの節ほど上に来る。脚注の出典の行やリンクの行き先だけに語があっても当たりにならない
+- 特定の層だけを読みたい（「会議の記録では」「文字起こしで確かめて」など）ときは `--path` で絞る
 - `--since`・`--sort date` は、バンドルの設定に日付の取り方（`[search.recent] date_sources`）がないとエラーになる。そのときは使わない
 - ページを網羅したいとき・語がどこに出るかを全部見たいときは grep（`--pages` など）を使う
 

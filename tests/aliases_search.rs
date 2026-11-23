@@ -28,6 +28,7 @@ fn run(words: &[&str], aliases: bool, all: bool) -> (Query, SearchResult<'static
         exclude: cfg.search.exclude.clone(),
         include_all: all,
         short_max: cfg.aliases.matching.short_max,
+        ..Default::default()
     };
     let r = search(bundle, &dict, &q, &opt).unwrap();
     (q, r)

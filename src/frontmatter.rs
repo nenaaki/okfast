@@ -30,6 +30,15 @@ impl Frontmatter {
         }
     }
 
+    /// 入れ子のキーの値（`["generated", "at"]` なら `generated.at`）。
+    pub fn get_path(&self, keys: &[&str]) -> Option<&Yaml> {
+        let (first, rest) = keys.split_first()?;
+        rest.iter().try_fold(self.get(first)?, |v, k| match v {
+            Yaml::Hash(h) => h.get(&Yaml::String((*k).to_string())),
+            _ => None,
+        })
+    }
+
     /// トップレベルのキー（文字列のもの）。
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         let hash = match &self.root {

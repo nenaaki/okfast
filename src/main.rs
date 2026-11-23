@@ -108,6 +108,9 @@ enum Command {
         /// 並べ方: relevance（関連度）か date（日付の新しい順）。
         #[arg(long, value_parser = ["relevance", "date"], default_value = "relevance")]
         sort: String,
+        /// この glob に当たるページだけを検索する（複数可。exclude に当たるページも含める）。
+        #[arg(long = "path", value_name = "GLOB")]
+        paths: Vec<String>,
     },
     /// 語がどう言い換えられるかを表示する。
     Aliases {
@@ -270,6 +273,7 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
             recent,
             since,
             sort,
+            paths,
         } => command::Command::Search {
             terms: terms.clone(),
             opts: command::SearchOptions {
@@ -281,6 +285,7 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
                 recent: *recent,
                 since: since.clone(),
                 sort_date: sort == "date",
+                paths: paths.clone(),
             },
         },
         Command::Grep {

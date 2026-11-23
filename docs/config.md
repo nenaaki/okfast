@@ -16,7 +16,7 @@ okfast の設定ファイルの説明です。`okfast config reference` で、�
 3. `okfast -b <root> config check` を実行し、**設定の警告（`!` の行）がなくなるまで** 2 に戻る。終了コードは、設定の警告なしが 0、ありが 1、設定ファイルのエラーが 2
    - `?` の行は辞書の中身についての所見（同じ語が複数の行にある、長すぎる呼び名、リンク切れ）。意図どおりのこともあるので、設定では直さず利用者に伝える。終了コードには影響しない
 4. `okfast -b <root> aliases <語>` で、代表的な語が意図どおりに言い換えられるかを確かめる
-5. `okfast search` を使うなら、init が根拠つきで提案した `[search.recent] date_sources` を確かめ（check が日付の取れた行の数と例を出す）、必ず読む節の見出しの語・決まったページは利用者に確かめてから書く
+5. `okfast search` を使うなら、init が根拠つきで提案した `[search] topic_keys` と `[search.recent] date_sources` を確かめ（check がキーを持つページの数、日付の取れた行の数と例を出す）、必ず読む節の見出しの語・決まったページは利用者に確かめてから書く
 
 ## 言い換えの約束
 
@@ -102,8 +102,11 @@ pages = { type = "Term", category = ["用語", "別名"] }  # キーどうしは
 |---|---|---|
 | `exclude` | `[]` | 既定で検索しないページの glob。`okfast grep --all` で含める。辞書のページそのもの（どの語でも当たる）を入れておくとよい |
 | `show_keys` | `[]` | `okfast search` の範囲の見出しに値を出す frontmatter のキー（例: `["credibility"]`）。JSON では `meta` に入る |
+| `topic_keys` | `["title"]` | `okfast search` で主題のページを決める frontmatter のキー（例: `["title", "description", "tags"]`）。値に語が当たったページ（と辞書の `boost` のリンク先）の範囲は点が上がる（下の「順位の付け方」）。`title` がないページはファイル名を使う。OKF 0.2 では説明のキーが決まっていないので、既定は `title` だけ |
 
 以下の 3 つは `okfast search`（読む範囲を返す検索）だけが使います。
+
+**順位の付け方**: 行の点は BM25（行を 1 つの文書とし、語ごとの idf と行の長さで決める）。主題のページでは、ページの `topic_keys` の値か辞書の `boost` に当たった語の idf の割合（`share`、0〜1）を取り、行の点に `1 + share` を掛けます。全部の語に当たるページほど強く上がり、1 語だけ当たるページは少しだけ上がります。範囲の点は `[search.sections] score` で決め、点の高い順（同点なら日付の新しい順）に並べます。脚注の定義の行（`skip_footnotes`）と、リンクの行き先（`](...)` の中）は当たりに数えません（grep は数えます）。
 
 ### `[search.sections]` — 節の切り方
 
@@ -114,6 +117,8 @@ pages = { type = "Term", category = ["用語", "別名"] }  # キーどうしは
 | `max_lines` | `40` | これより長い節は、当たった行の前後だけを範囲にする（重なる・隣り合うものはつなぐ） |
 | `window` | `4` | 長い節で、当たった行の前後に含める行の数 |
 | `min_chars` | `0` | 本文（前後の空白を除く）がこの文字数より短い行は、当たりに数えない。見出しの行は短くても数える |
+| `score` | `"decay"` | 範囲の点の決め方。`decay` は当たった行の点を高い順に並べ、1・1/2・1/4… を掛けて足す（同じ語の繰り返しの効きを抑えつつ、何行も当たる節を少し上げる）。`max` は語ごとに範囲の中で最も高い行の点を取って足す（繰り返しを数えない） |
+| `skip_footnotes` | `true` | 脚注の定義の行（`[^id]: 出典の題名・パス`）を当たりに数えない（出典の題名に語が入りやすく、「出典」「関連」の節が上がるため）。日付の取り出し元（`footnote_source`）としては使う |
 
 ### `[search.recent]` — 新しい記録と、行の日付の取り方
 
@@ -129,12 +134,13 @@ pages = { type = "Term", category = ["用語", "別名"] }  # キーどうしは
 
 | 値 | 日付 |
 |---|---|
-| `table_row` | 表のデータ行の 1 列目（と `table_columns` の列）のセル |
+| `table_row` | 表のデータ行の 1 列目（と `table_columns` の列）のセル。セルが年のない日付（`M-D`・`M/D`）だけなら、ページを書いた日（OKF 0.2 §5.2 の `generated.at`）の年で読む |
 | `frontmatter:<キー>` | ページの frontmatter のキーの値（ページのすべての行に効く。例: `frontmatter:date`） |
 | `footnote_source` | 行が参照する脚注 `[^id]` の定義の本文（出典のパス・題名）。リンク先のページは開かない |
 | `heading` | 行が属する見出しと、その親の見出しのうち、いちばん近い日付つきのもの |
 
 - 日付の書式は `YYYY-MM-DD` と `YYYY/MM/DD`（月・日は 1 桁も可）だけ。前後が数字のもの、ありえない月日は日付にしない。1 つのセル・文字列に複数あれば最も新しいもの
+- 年のない日付は `table_row` のセルだけで読む（セル全体が `M-D` か `M/D` のとき）。年は `generated.at` の年。ただし月が `generated.at` の月より 6 か月を超えて先なら前の年とみなす（1 月に書いたページの「12-20」は前年の 12 月 20 日）。`generated.at` がないページでは読まない（推測の日付は付けない）。年末年始をまたぐ表は年を書く
 - 範囲の日付は、範囲の行の日付のうち最も新しいもの。日付の分からない範囲は、新しい記録と `--since` の候補にしない
 
 ### `[search.must_read]` — 必ず読む範囲
@@ -143,10 +149,10 @@ pages = { type = "Term", category = ["用語", "別名"] }  # キーどうしは
 
 | キー | 既定値 | 意味 |
 |---|---|---|
-| `topics` | `2` | 見出しを探す主題のページの数。主題のページは、辞書の `boost` のリンク先と、題名に語が当たったページ（grep の順位の上から） |
+| `topics` | `2` | 見出しを探す主題のページの数。主題のページ（`topic_keys` の値か辞書の `boost` に語が当たったページ）を `share` の高い順（同じなら当たった行の多い順）に選ぶ |
 | `headings` | `[]` | 見出しにこの語のどれかを含む節を出す（正規化して部分一致） |
 | `max_lines` | `60` | 出す節の行数の上限（超えたら先頭から） |
-| `pages` | `[]` | `{ path = "<glob>", top = 3 }` の並び。当たったページのうち path に当たるものから、点の高い範囲を `top` 件出す。`exclude` に当たるページでもよい（決定の一覧などを既定の検索から除いたまま使える） |
+| `pages` | `[]` | `{ path = "<glob>", top = 3 }` の並び。当たったページのうち path に当たるものから、点の高い範囲を `top` 件出す。`exclude` に当たるページでもよい（決定の一覧などを既定の検索から除いたまま使える）。`window` を足すと、節の長さによらず当たった行の前後 `window` 行で切り出す。`window = 0` なら当たった行だけを 1 件ずつ出す（1 行 1 件の決定の一覧など。隣り合う行もつながない）。省くと `[search.sections]` の切り方 |
 
 ## 例
 
@@ -172,8 +178,9 @@ key   = "credibility"
 allow = ["A", "B"]
 
 [search]
-exclude   = ["glossary/別名表.md", "references/transcripts/**", "decisions/**"]
-show_keys = ["credibility"]
+exclude    = ["glossary/別名表.md", "references/transcripts/**", "decisions/**"]
+show_keys  = ["credibility"]
+topic_keys = ["title", "description", "tags"]
 
 [search.recent]
 date_sources  = ["table_row", "frontmatter:date", "footnote_source", "heading"]
@@ -181,7 +188,7 @@ table_columns = ["日付"]
 
 [search.must_read]
 headings = ["未決", "矛盾", "未確認"]
-pages    = [{ path = "decisions/*.md", top = 3 }]
+pages    = [{ path = "decisions/*.md", top = 3, window = 0 }]
 ```
 
 この設定が読む表（`glossary/別名表.md`）:
@@ -217,3 +224,5 @@ aliases: [WP, ウィジェットプロ]
 | trust で除いたページ | 辞書のページに trust のキーがない。キーを書くか、trust を外す |
 | 日付の取れた行がない（[search.recent]） | `date_sources` の取り出し元に、日付が書かれていない。check が示す内訳と、`config init` の提案を見る |
 | must_read の path に当たるページがない | `[search.must_read] pages` の glob が違う。`index.md`・`log.md` は OKF の予約名でページにならない |
+| generated.at がないので年が分からず読めない | 表の 1 列目に年のない日付（`M-D`）があるページに `generated.at` がない。frontmatter に `generated: { by: ..., at: ... }` を書くか、表に年を書く |
+| キー … を持つページがない（topic_keys） | `[search] topic_keys` のキーを持つページがない。キーの名前を確かめる |

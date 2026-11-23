@@ -143,12 +143,16 @@ pub struct TrustConfig {
 }
 
 /// 検索の設定。
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchConfig {
     /// 既定で検索しないページ（glob）。`--all` で含める。
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// `search` で主題のページかを決める frontmatter のキー。値に語が当たったページの範囲は点が上がる
+    /// （`title` がないページはファイル名を使う）。
+    #[serde(default = "default_topic_keys")]
+    pub topic_keys: Vec<String>,
     /// `search` の範囲の見出しに値を出す frontmatter のキー（例: `["credibility"]`）。
     #[serde(default)]
     pub show_keys: Vec<String>,
@@ -161,6 +165,30 @@ pub struct SearchConfig {
     /// `search` で必ず出す範囲。
     #[serde(default)]
     pub must_read: MustReadConfig,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            exclude: Vec::new(),
+            topic_keys: default_topic_keys(),
+            show_keys: Vec::new(),
+            sections: SectionsConfig::default(),
+            recent: RecentConfig::default(),
+            must_read: MustReadConfig::default(),
+        }
+    }
+}
+
+/// 範囲の点の決め方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SectionScore {
+    /// 当たった行の点を高い順に並べ、1・1/2・1/4… を掛けて足す（何行も当たる範囲が少し上がる）。
+    #[default]
+    Decay,
+    /// 語ごとに範囲の中で最も高い行の点を取り、足す（同じ語の繰り返しを数えない）。
+    Max,
 }
 
 /// `search` の節の切り方。
@@ -176,6 +204,12 @@ pub struct SectionsConfig {
     /// 本文（前後の空白を除く）がこの文字数より短い行は、当たりに数えない（見出しの行は数える）。
     #[serde(default)]
     pub min_chars: usize,
+    /// 範囲の点の決め方。
+    #[serde(default)]
+    pub score: SectionScore,
+    /// 脚注の定義の行（`[^id]: 出典`）を当たりに数えない（日付の取り出し元としては使う）。
+    #[serde(default = "default_true")]
+    pub skip_footnotes: bool,
 }
 
 impl Default for SectionsConfig {
@@ -184,6 +218,8 @@ impl Default for SectionsConfig {
             max_lines: default_section_max_lines(),
             window: default_window(),
             min_chars: 0,
+            score: SectionScore::default(),
+            skip_footnotes: true,
         }
     }
 }
@@ -261,8 +297,15 @@ pub struct MustReadPage {
     /// 出す範囲の数。
     #[serde(default = "default_must_page_top")]
     pub top: usize,
+    /// 当たった行の前後に含める行の数。指定すると節の長さによらず切り出す（0 なら当たった行だけ）。
+    /// 省略すると `[search.sections]` と同じ切り方。
+    #[serde(default)]
+    pub window: Option<usize>,
 }
 
+fn default_topic_keys() -> Vec<String> {
+    vec!["title".to_string()]
+}
 fn default_section_max_lines() -> usize {
     40
 }

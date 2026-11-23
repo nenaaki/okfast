@@ -1,10 +1,11 @@
 //! 行の日付の取り出し。
 //!
 //! OKF 0.2 には日付をどこに書くかの決まりがないので、どこから取るかは設定（`[search.recent] date_sources`）で
-//! 宣言させる。日付の書式は `YYYY-MM-DD` と `YYYY/MM/DD`（月・日は 1 桁も可）だけを読む。
+//! 宣言させる。日付の書式は `YYYY-MM-DD` と `YYYY/MM/DD`（月・日は 1 桁も可）。表のセルに年のない日付
+//! （`M-D`・`M/D`）だけが書かれていれば、ページを書いた日（`generated.at`）の年で読む（[`month_day`]）。
 
 use crate::bundle::Page;
-use crate::markdown;
+use crate::markdown::{self, footnote_def};
 use crate::sections::Outline;
 use std::collections::HashMap;
 
@@ -17,7 +18,7 @@ pub type LineDates = std::sync::Arc<[Option<Date>]>;
 /// 日付の取り出し元。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DateSource {
-    /// 表のデータ行の 1 列目（と、設定で名前を挙げた列）。
+    /// 表のデータ行の 1 列目（と、設定で名前を挙げた列）。年のない日付は `generated.at` の年で読む。
     TableRow,
     /// frontmatter のキー（ページの全行に効く）。
     Frontmatter(String),
@@ -110,6 +111,11 @@ fn date_at(b: &[u8]) -> Option<(Date, usize)> {
     if dn == 0 || b.get(end).is_some_and(u8::is_ascii_digit) {
         return None;
     }
+    Some((ymd(year, month, day)?, end))
+}
+
+/// 年・月・日を日付にする。ありえない月日は `None`。
+fn ymd(year: u32, month: u32, day: u32) -> Option<Date> {
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
     let days = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -121,7 +127,34 @@ fn date_at(b: &[u8]) -> Option<(Date, usize)> {
     if year == 0 || day == 0 || day > days {
         return None;
     }
-    Some((year * 10000 + month * 100 + day, end))
+    Some(year * 10000 + month * 100 + day)
+}
+
+/// ページを書いた日（OKF 0.2 §5.2 の `generated.at`）。年のない日付の年を決める基準にする。
+pub fn generated_at(page: &Page) -> Option<Date> {
+    let at = page.frontmatter().get_path(&["generated", "at"])?;
+    let s = match at {
+        yaml_rust2::Yaml::String(s) | yaml_rust2::Yaml::Real(s) => s.as_str(),
+        _ => return None,
+    };
+    date_at(s.trim().as_bytes()).map(|(d, _)| d)
+}
+
+/// 文字列全体が年のない日付（`M-D`・`M/D`。月・日は 1〜2 桁）なら、`base`（ページを書いた日）の年で読む。
+/// 月が `base` の月より 6 か月を超えて先なら、前の年の話とみなす（1 月に書いたページの「12-20」は前年）。
+pub fn month_day(s: &str, base: Date) -> Option<Date> {
+    let b = s.trim().as_bytes();
+    let num = |p: &[u8]| -> Option<u32> {
+        (!p.is_empty() && p.len() <= 2 && p.iter().all(u8::is_ascii_digit))
+            .then(|| p.iter().fold(0, |v, &c| v * 10 + u32::from(c - b'0')))
+    };
+    let sep = b.iter().position(|&c| c == b'-' || c == b'/')?;
+    let (month, day) = (num(&b[..sep])?, num(&b[sep + 1..])?);
+    let mut year = base / 10000;
+    if month > base / 100 % 100 + 6 {
+        year -= 1;
+    }
+    ymd(year, month, day)
 }
 
 /// ページの本文の各行（0 始まり）の日付。`sources` の順に探し、最初に見つかったものを使う。
@@ -143,6 +176,7 @@ pub fn line_dates(
         }
         match src {
             DateSource::TableRow => {
+                let base = generated_at(page);
                 let lines = (0..n).map(|i| (i, ix.line(body, i)));
                 for t in markdown::tables(lines) {
                     let cols: Vec<usize> = table_columns
@@ -154,10 +188,13 @@ pub fn line_dates(
                         if out[row.line].is_some() {
                             continue;
                         }
-                        out[row.line] = cols
-                            .iter()
-                            .filter_map(|&c| row.cells.get(c))
-                            .find_map(|cell| newest_in(cell));
+                        out[row.line] =
+                            cols.iter()
+                                .filter_map(|&c| row.cells.get(c))
+                                .find_map(|cell| {
+                                    newest_in(cell)
+                                        .or_else(|| base.and_then(|b| month_day(cell, b)))
+                                });
                     }
                 }
             }
@@ -241,14 +278,6 @@ pub fn cached_line_dates(
     page.cached_dates(h.finish(), || {
         line_dates(page, page.outline(), sources, table_columns)
     })
-}
-
-/// 脚注の定義 `[^id]: 本文` なら（id, 本文）。
-fn footnote_def(line: &str) -> Option<(&str, &str)> {
-    let t = line.trim_start();
-    let rest = t.strip_prefix("[^")?;
-    let close = rest.find("]:")?;
-    Some((&rest[..close], &rest[close + 2..]))
 }
 
 /// 行の中の脚注の参照 `[^id]` の id。
@@ -342,6 +371,41 @@ mod tests {
         let d = page_dates(text, &[], &[]);
         assert!(d.iter().all(Option::is_none));
     }
+    #[test]
+    fn month_day_uses_generated_year() {
+        assert_eq!(month_day("04-08", 20261123), Some(20260408));
+        assert_eq!(month_day(" 11/20 ", 20261123), Some(20261120));
+        assert_eq!(month_day("12-30", 20261123), Some(20261230)); // 先の予定も同じ年
+        assert_eq!(month_day("12-20", 20270110), Some(20261220)); // 1 月に書いた 12 月は前年
+        assert_eq!(month_day("7/1", 20270110), Some(20270701)); // 6 か月先までは同じ年
+        assert_eq!(month_day("8/1", 20270110), Some(20260801));
+        assert_eq!(month_day("2-29", 20261123), None);
+        assert_eq!(month_day("2-29", 20241123), Some(20240229));
+        for s in ["13-01", "1-2-3", "123-4", "4-", "a-1", "1.5", "2026-04-08"] {
+            assert_eq!(month_day(s, 20261123), None, "{s}");
+        }
+
+        let text = "---\ntype: Log\ngenerated: { by: human:someone, at: 2027-01-10T09:00:00Z }\n---\n\
+| 日 | 内容 |\n\
+|---|---|\n\
+| 12-20 | 前年の話 |\n\
+| 01-05 | 今年の話 |\n\
+| 2026-03-02 | 年あり |\n\
+| 1 月 5 日 | 読まない |\n";
+        let d = page_dates(text, &[DateSource::TableRow], &[]);
+        assert_eq!(d[2], Some(20261220));
+        assert_eq!(d[3], Some(20270105));
+        assert_eq!(d[4], Some(20260302));
+        assert_eq!(d[5], None);
+        // generated.at がなければ年のない日付は読まない
+        let d = page_dates(
+            "---\ntype: Log\n---\n| 日 | 内容 |\n|---|---|\n| 12-20 | 話 |\n",
+            &[DateSource::TableRow],
+            &[],
+        );
+        assert_eq!(d[2], None);
+    }
+
     #[test]
     fn cache_follows_sources() {
         let root = std::env::temp_dir().join(format!("okfast-dates-cache-{}", std::process::id()));
