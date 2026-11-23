@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// 形式の版。変えたら上げる。
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 const MAGIC_REQ: &[u8; 4] = b"OKFQ";
 const MAGIC_RES: &[u8; 4] = b"OKFR";
 /// 1 フレームの上限（壊れた入力で大きなメモリを取らないため）。
@@ -197,6 +197,7 @@ impl Request {
                             opts.count,
                             opts.files,
                             opts.pages,
+                            opts.json,
                         ] {
                             e.u8(u8::from(b));
                         }
@@ -246,6 +247,7 @@ impl Request {
                             count: d.bool()?,
                             files: d.bool()?,
                             pages: d.bool()?,
+                            json: d.bool()?,
                             max_per_page: d.u32()? as usize,
                             max_pages: d.u32()? as usize,
                             context: d.u32()? as usize,
@@ -343,6 +345,7 @@ mod tests {
                         opts: GrepOptions {
                             all: true,
                             files: true,
+                            json: true,
                             context: 2,
                             max_pages: 0,
                             ..GrepOptions::default()

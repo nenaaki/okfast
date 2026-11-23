@@ -5,6 +5,7 @@
 //! - [`aliases`] — 設定に従って同義語の辞書を作る
 //! - [`search`] — 同義語で言い換える行単位の検索
 //! - [`daemon`] — すべてをメモリに持ち、ファイルの変更を監視して答える常駐プロセス
+//! - [`mcp`] — AI のクライアントからツールとして呼ばれる MCP サーバー
 
 pub mod aliases;
 pub mod bundle;
@@ -17,6 +18,7 @@ pub mod error;
 pub mod frontmatter;
 pub mod init;
 pub mod markdown;
+pub mod mcp;
 pub mod normalize;
 pub mod search;
 pub mod selector;

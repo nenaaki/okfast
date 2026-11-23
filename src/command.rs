@@ -42,6 +42,9 @@ pub struct GrepOptions {
     pub files: bool,
     /// 当たったページをすべて、1 ページ 1 行（題名・行数・いちばん上の当たり行の抜粋）で出す。
     pub pages: bool,
+    /// 結果を 1 つの JSON で出す（順位順の全ページ。行は `max_per_page`・`max_pages`・`max_columns` に従う。
+    /// `context`・`max_chars` は使わない）。
+    pub json: bool,
     /// 1 ページに出す当たった行の数（0 は無制限）。
     pub max_per_page: usize,
     /// 行を出すページの数（0 は無制限）。残りはパスと行数だけを出す。
@@ -74,6 +77,7 @@ impl Default for GrepOptions {
             count: false,
             files: false,
             pages: false,
+            json: false,
             max_per_page: Self::MAX_PER_PAGE,
             max_pages: Self::MAX_PAGES,
             context: 0,
@@ -156,6 +160,10 @@ fn grep(terms: &[String], o: &GrepOptions, cx: &Context<'_>, out: &mut impl Writ
     };
     let r = search::search(cx.bundle, dict, &q, &opt)?;
     let n_terms = q.terms.len();
+    if o.json {
+        print_json(&q, &r, &opt, o, dict, out);
+        return Ok(if r.files.is_empty() { 1 } else { 0 });
+    }
 
     let labels: Vec<&str> = q.terms.iter().map(|t| t.label.as_str()).collect();
     let _ = writeln!(out, "# grep: {}", labels.join(" ／ "));
@@ -314,6 +322,126 @@ fn print_lines(
             items.join(", ")
         );
     }
+}
+
+/// 結果を 1 行の JSON で出す。ページは順位順にすべて並べ、当たった行は上位 `max_pages` ページに
+/// 1 ページ `max_per_page` 行まで付ける（`lines` は省く前の行数）。書式は README の「JSON の出力」。
+fn print_json(
+    q: &Query,
+    r: &search::SearchResult<'_>,
+    opt: &Options,
+    o: &GrepOptions,
+    dict: &Dictionary,
+    out: &mut impl Write,
+) {
+    use serde::Serialize;
+    use std::borrow::Cow;
+
+    #[derive(Serialize)]
+    struct Out<'a> {
+        terms: Vec<JTerm<'a>>,
+        total_lines: usize,
+        total_pages: usize,
+        searched: usize,
+        excluded: usize,
+        exclude: &'a [String],
+        pages: Vec<JPage<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JTerm<'a> {
+        term: &'a str,
+        added: &'a [String],
+        conditional: Vec<JCond<'a>>,
+        boost: &'a [String],
+        lines: usize,
+    }
+    #[derive(Serialize)]
+    struct JCond<'a> {
+        when: &'a str,
+        names: &'a [String],
+    }
+    #[derive(Serialize)]
+    struct JPage<'a> {
+        rank: usize,
+        path: &'a str,
+        title: String,
+        lines: usize,
+        terms: u32,
+        title_hit: bool,
+        heading_hits: usize,
+        boosted: bool,
+        hits: Vec<JHit<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JHit<'a> {
+        line: usize,
+        text: Cow<'a, str>,
+    }
+
+    let limit = |n: usize| if n == 0 { usize::MAX } else { n };
+    let per = r.lines_per_term(q.terms.len());
+    let terms = q
+        .terms
+        .iter()
+        .zip(&per)
+        .map(|(t, &lines)| {
+            let e = &t.expansion;
+            JTerm {
+                term: &t.label,
+                added: &e.added,
+                conditional: e
+                    .conditional
+                    .iter()
+                    .map(|c| JCond {
+                        when: dict.whens()[c.when].description(),
+                        names: &c.names,
+                    })
+                    .collect(),
+                boost: &e.boost,
+                lines,
+            }
+        })
+        .collect();
+    let pages = r
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let shown = if i < limit(o.max_pages) {
+                &f.hits[..f.hits.len().min(limit(o.max_per_page))]
+            } else {
+                &[]
+            };
+            JPage {
+                rank: i + 1,
+                path: f.rel,
+                title: f.page.title(),
+                lines: f.hits.len(),
+                terms: f.terms.count_ones(),
+                title_hit: f.title_terms != 0,
+                heading_hits: f.heading_hits,
+                boosted: f.boosted,
+                hits: shown
+                    .iter()
+                    .map(|h| JHit {
+                        line: h.line,
+                        text: clip(h.text, o.max_columns),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    let v = Out {
+        terms,
+        total_lines: r.total_lines(),
+        total_pages: r.files.len(),
+        searched: r.searched,
+        excluded: r.excluded,
+        exclude: if r.excluded > 0 { &opt.exclude } else { &[] },
+        pages,
+    };
+    let _ = serde_json::to_writer(&mut *out, &v);
+    let _ = writeln!(out);
 }
 
 /// 抜粋の文字数。
