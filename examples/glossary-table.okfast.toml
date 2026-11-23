@@ -1,0 +1,27 @@
+# 設定例: 別名表（表形式の辞書）と、文字起こしのページを持つバンドル。
+# 使い方: okfast -b <バンドルの root> --config examples/glossary-table.okfast.toml grep "Widget Pro"
+# （バンドルの root に okfast.toml として置けば --config は要らない）
+
+# 別名表（glossary/別名表.md）の表。1 行 = 1 概念
+[[aliases.table]]
+pages   = { path = "glossary/別名表.md" }
+concept = "概念"
+names   = "呼び名"
+split   = ["、"]
+boost   = "主題のページ"
+
+# 文字起こしの誤認識は、文字起こしのページを検索するときだけ使う
+[[aliases.table.conditional]]
+column = "文字起こしの誤認識"
+when   = { path = "references/transcripts/**" }
+
+# ページごとに別名を書く形式（frontmatter の aliases）
+[[aliases.frontmatter]]
+keys = ["aliases"]
+
+[aliases.match]
+short_max = 3
+
+[search]
+# 文字起こし・README・辞書そのものは既定で除く（--all で含める）
+exclude = ["references/transcripts/**", "README.md", "glossary/別名表.md"]
