@@ -115,6 +115,8 @@ pub struct SearchOptions {
     pub since: Option<String>,
     /// 日付の新しい順に並べる。
     pub sort_date: bool,
+    /// 空でなければ、この glob に当たるページだけを検索する（`exclude` に当たるページも含める）。
+    pub paths: Vec<String>,
 }
 
 impl SearchOptions {
@@ -135,6 +137,7 @@ impl Default for SearchOptions {
             recent: None,
             since: None,
             sort_date: false,
+            paths: Vec::new(),
         }
     }
 }
@@ -210,6 +213,7 @@ fn grep(terms: &[String], o: &GrepOptions, cx: &Context<'_>, out: &mut impl Writ
         exclude: cx.config.search.exclude.clone(),
         include_all: o.all,
         short_max: cx.config.aliases.matching.short_max,
+        ..Default::default()
     };
     let r = search::search(cx.bundle, dict, &q, &opt)?;
     let n_terms = q.terms.len();
@@ -719,11 +723,12 @@ fn search_ranges(
         recent: o.recent.unwrap_or(cfg.recent.count),
         since,
         sort_date: o.sort_date,
+        paths: o.paths.clone(),
     };
     let r = ranges::search_ranges(cx.bundle, dict, &q, cfg, &opt)?;
     let code = if r.ranges.is_empty() { 1 } else { 0 };
     if o.json {
-        print_ranges_json(&q, &r, cfg, dict, out);
+        print_ranges_json(&q, &r, cfg, dict, &o.paths, out);
         return Ok(code);
     }
 
@@ -737,8 +742,19 @@ fn search_ranges(
             let _ = writeln!(out, "# 「{}」に当たる行はない", t.label);
         }
     }
-    if !r.boosted.is_empty() {
-        let _ = writeln!(out, "# 主題のページ（先に表示）: {}", r.boosted.join(", "));
+    if !r.topics.is_empty() {
+        const TOPICS: usize = 5;
+        let items: Vec<&str> = r.topics.iter().take(TOPICS).map(|t| t.0).collect();
+        let more = if r.topics.len() > TOPICS {
+            format!("（ほか {}）", r.topics.len() - TOPICS)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            "# 主題のページ（点を上げる）: {}{more}",
+            items.join(", ")
+        );
     }
     let mut summary = format!(
         "# 当たり: {} 行・{} 範囲 / {} ページ（検索 {} ページ",
@@ -747,7 +763,9 @@ fn search_ranges(
         r.total_pages,
         r.searched
     );
-    if r.excluded > 0 {
+    if !o.paths.is_empty() {
+        summary.push_str(&format!("、--path {}", o.paths.join(", ")));
+    } else if r.excluded > 0 {
         summary.push_str(&format!(
             "、除外 {}: {} — --all で含める",
             r.excluded,
@@ -828,8 +846,13 @@ fn range_notes(rg: &ranges::Range<'_>, cfg: &crate::config::SearchConfig) -> Vec
     if let Some(d) = rg.date {
         notes.push(dates::format(d));
     }
-    if let Some(h) = rg.heading.filter(|h| !h.is_empty()) {
-        notes.push(format!("§{h}"));
+    // 見出しは親 1 つまで（同じ見出しが別の親の下にあっても区別できるように）
+    match rg.headings().as_slice() {
+        [.., parent, h] if !h.is_empty() && !parent.is_empty() => {
+            notes.push(format!("§{parent} > {h}"))
+        }
+        [.., h] if !h.is_empty() => notes.push(format!("§{h}")),
+        _ => {}
     }
     for k in &cfg.show_keys {
         if let Some(v) = rg.page.frontmatter().string(k) {
@@ -886,6 +909,7 @@ fn print_ranges_json(
     r: &ranges::RangeResult<'_>,
     cfg: &crate::config::SearchConfig,
     dict: &Dictionary,
+    paths: &[String],
     out: &mut impl Write,
 ) {
     use serde::Serialize;
@@ -900,8 +924,15 @@ fn print_ranges_json(
         searched: usize,
         excluded: usize,
         exclude: &'a [String],
+        paths: &'a [String],
+        topics: Vec<JTopic<'a>>,
         ranges: Vec<JRange<'a>>,
         rest: Vec<JRest<'a>>,
+    }
+    #[derive(Serialize)]
+    struct JTopic<'a> {
+        rel: &'a str,
+        topic: f64,
     }
     #[derive(Serialize)]
     struct JTerm<'a> {
@@ -923,6 +954,7 @@ fn print_ranges_json(
         to: usize,
         title: String,
         heading: Option<&'a str>,
+        headings: Vec<&'a str>,
         section: [usize; 2],
         partial: bool,
         date: Option<String>,
@@ -930,6 +962,7 @@ fn print_ranges_json(
         score: f64,
         terms: u32,
         boosted: bool,
+        topic: f64,
         must: bool,
         recent: bool,
         hits: Vec<JHit<'a>>,
@@ -982,6 +1015,7 @@ fn print_ranges_json(
             to: x.to,
             title: x.page.title(),
             heading: x.heading,
+            headings: x.headings(),
             section: [x.section.0, x.section.1],
             partial: x.partial,
             date: x.date.map(dates::format),
@@ -993,6 +1027,7 @@ fn print_ranges_json(
             score: round(x.score),
             terms: x.terms.count_ones(),
             boosted: x.boosted,
+            topic: round(x.topic),
             must: x.kind == Kind::Must,
             recent: x.kind == Kind::Recent,
             hits: x
@@ -1025,7 +1060,20 @@ fn print_ranges_json(
         total_pages: r.total_pages,
         searched: r.searched,
         excluded: r.excluded,
-        exclude: if r.excluded > 0 { &cfg.exclude } else { &[] },
+        exclude: if r.excluded > 0 && paths.is_empty() {
+            &cfg.exclude
+        } else {
+            &[]
+        },
+        paths,
+        topics: r
+            .topics
+            .iter()
+            .map(|&(rel, t)| JTopic {
+                rel,
+                topic: round(t),
+            })
+            .collect(),
         ranges,
         rest,
     };

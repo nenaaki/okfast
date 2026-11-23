@@ -119,6 +119,9 @@ fn daemon_matches_local_and_sees_changes() {
         &["search", "Widget Pro", "SPK"],
         &["search", "--json", "--all", "-n", "1", "Widget"],
         &["search", "存在しない語"],
+        &[
+            "search", "--json", "--path", "**/*.md", "--path", "notes/**", "Widget",
+        ],
     ] {
         let mut no = vec!["--no-daemon"];
         no.extend_from_slice(args);

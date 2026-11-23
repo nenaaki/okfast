@@ -123,17 +123,19 @@ okfast -b <root> search -n 5 --per-page 1 価格     # 上位 5 範囲、1 ペ�
 okfast -b <root> search --since 2026-01-01 価格    # その日以降の日付の範囲だけ
 okfast -b <root> search --sort date 価格           # 日付の新しい順
 okfast -b <root> search --recent 0 価格            # 新しい記録を足さない
+okfast -b <root> search --path "meetings/**" 価格  # この glob のページだけ（複数可。exclude のページも含める）
 okfast -b <root> search --json 価格                # 1 行の JSON
 ```
 
 ```text
 # search: Widget Pro ／ 価格
+# 主題のページ（点を上げる）: notes/widget.md
 # 当たり: 12 行・6 範囲 / 3 ページ（検索 40 ページ）
 ## 必ず読む範囲（見出しや決まったページで選んだもの。関連度によらない）
-notes/widget.md:18-21［§未決｜credibility: A］
+notes/widget.md:18-21［§概要 > 未決｜credibility: A］
   （語の当たりはない）
 ## 関連度の上位
-notes/widget.md:10-16［2026-03-02｜§価格｜credibility: A］
+notes/widget.md:10-16［2026-03-02｜§概要 > 価格｜credibility: A］
   10: ## 価格
   11: 価格は次のとおり。
 ## 新しい記録（関連度の上位に入らなかったもの）
@@ -143,10 +145,13 @@ notes/meeting.md:6-7［2026-04-01｜§議題］
 ```
 
 - **結果の単位は節**です。節は見出し（`#`〜`######`）の行から次の見出しの手前まで。答えの行に語がなくても、同じ節に当たりがあれば範囲に入ります。40 行（`[search.sections] max_lines`）を超える節は、当たった行の前後 4 行（`window`）だけを切り出し、`節 a-b の一部` と示します
-- **順位は BM25** です。行を 1 つの文書とみなし、ありふれた語は軽く、珍しい語は重く、短い行ほど重く数えます（行の中の回数は数えない）。範囲の点は、語ごとに範囲の中で最も高い行の点を足したもの。並びは、主題のページ（辞書の boost）→ 範囲に当たった語の種類が多い → 題名に当たったページ → 点、の順です
-- **新しい記録**: 上位のあとに、日付の新しい範囲を 4 件（`[search.recent] count`）足します。行の日付をどこから取るか（表の行頭・frontmatter・脚注の出典・見出し）は `date_sources` で宣言します。宣言がなければ足しません
-- **必ず読む範囲**: 主題のページの上位 2 件（`[search.must_read] topics`）で、見出しが設定の語（`headings`）に当たる節を、関連度によらず先頭に出します。決まったページ（`pages`）の上位の範囲も足せます
-- 範囲の見出しの `［…］` には、日付・`§見出し`・`[search] show_keys` に書いた frontmatter の値が入ります
+- **順位は BM25** です。行を 1 つの文書とみなし、ありふれた語は軽く、珍しい語は重く、短い行ほど重く数えます（行の中の回数は数えない）。脚注の定義の行（`[^id]: 出典`）とリンクの行き先（`](...)` の中）は当たりに数えません
+- **主題のページは点を上げます**。題名（`[search] topic_keys` で説明・タグなども足せる）か辞書の boost に当たった語の idf の割合 `share` を取り、そのページの行の点に `1 + share` を掛けます。全部の語に当たるページほど強く上がり、ありふれた 1 語だけが当たるページが上位を占めることはありません
+- 範囲の点は、当たった行の点を高い順に並べて 1・1/2・1/4… を掛けて足したもの（`[search.sections] score = "decay"`）。何行にもわたって当たる節が、1 行だけかする節より上に来ます。並びは点の高い順（同点なら日付の新しい順）です
+- **新しい記録**: 上位のあとに、日付の新しい範囲を 4 件（`[search.recent] count`）足します。行の日付をどこから取るか（表の行頭・frontmatter・脚注の出典・見出し）は `date_sources` で宣言します。宣言がなければ足しません。表の行頭の年のない日付（`MM-DD`）は、ページの `generated.at` の年で読みます
+- **必ず読む範囲**: 主題のページ（`share` の高い順）の上位 2 件（`[search.must_read] topics`）で、見出しが設定の語（`headings`）に当たる節を、関連度によらず先頭に出します。決まったページ（`pages`）の上位の範囲も足せます。1 行 1 件の表なら `window = 0` で当たった行だけを出せます
+- 範囲の見出しの `［…］` には、日付・`§見出し`（親の見出しが 1 つあれば `§親 > 見出し`）・`[search] show_keys` に書いた frontmatter の値が入ります
+- `--path <glob>` で、検索するページを絞れます（複数可）。`exclude` に当たるページでも、`--path` で明示すれば含めます
 - 抜粋は点の高い当たった行 2 行です。範囲は Read の `offset` = 開始行、`limit` = 終了行 - 開始行 + 1 で読みます
 - 終了コードは、範囲ありが 0、なしが 1、エラーが 2 です
 
@@ -156,15 +161,18 @@ notes/meeting.md:6-7［2026-04-01｜§議題］
 
 ```json
 {"terms":[{"term":"価格","added":[],"conditional":[],"boost":[],"lines":4}],
- "total_lines":4,"total_ranges":3,"total_pages":2,"searched":2,"excluded":0,"exclude":[],
- "ranges":[{"rel":"notes/widget.md","from":10,"to":16,"title":"Widget Pro","heading":"価格","section":[10,16],"partial":false,
-            "date":"2026-03-02","meta":{"credibility":"A"},"score":2.019,"terms":1,"boosted":false,"must":false,"recent":false,
-            "hits":[{"line":10,"text":"## 価格","score":2.019,"date":null}]}],
+ "total_lines":4,"total_ranges":3,"total_pages":2,"searched":2,"excluded":0,"exclude":[],"paths":[],
+ "topics":[{"rel":"notes/widget.md","topic":1.0}],
+ "ranges":[{"rel":"notes/widget.md","from":10,"to":16,"title":"Widget Pro","heading":"価格","headings":["概要","価格"],
+            "section":[10,16],"partial":false,"date":"2026-03-02","meta":{"credibility":"A"},"score":4.038,"terms":1,
+            "boosted":false,"topic":1.0,"must":false,"recent":false,
+            "hits":[{"line":10,"text":"## 価格","score":4.038,"date":null}]}],
  "rest":[{"rel":"notes/a.md","from":3,"to":9,"score":0.5,"date":null}]}
 ```
 
 - `ranges` は出す範囲を、必ず読む範囲（`must`）→ 上位 → 新しい記録（`recent`）の順に並べます。`rest` は出さなかった範囲（順位順）
 - `section` は節全体の行、`partial` は節の一部を切り出したか、`meta` は `show_keys` の値です。`hits` は範囲の中の当たった行すべて（1 行 300 文字まで）
+- `headings` は節の見出しの階層（いちばん上から）、`heading` はその最後の見出しです。`topic` はページの主題の度合い `share`（0〜1）、`boosted` は辞書の boost のリンク先か。`topics` は主題のページを `share` の高い順に並べたもの、`paths` は `--path` の glob です
 
 ### 常駐プロセス
 
@@ -203,7 +211,7 @@ OKF 0.2 には同義語の決まりがない（type も frontmatter のキーも
 
 - シェルを通さないので、呼び出しのたびのシェルの起動・フック・許可の確認がかかりません（Windows では 1 回あたり数秒になることがあります）
 - Bash を持たないエージェント（Read・Grep・Glob だけのものなど）にも、ツールとして渡せます
-- ツールの引数は CLI のオプションと同じ名前です（`terms`、`pages`、`files`、`count`、`json`、`context`、`max_per_page`、`max_pages`、`max_columns`、`max_chars`、`full`、`all`、`no_aliases`）。search は `terms`、`top`、`per_page`、`recent`、`since`、`sort`（`relevance` か `date`）、`json`、`all`、`no_aliases`。出力も CLI と同じです
+- ツールの引数は CLI のオプションと同じ名前です（`terms`、`pages`、`files`、`count`、`json`、`context`、`max_per_page`、`max_pages`、`max_columns`、`max_chars`、`full`、`all`、`no_aliases`）。search は `terms`、`top`、`per_page`、`recent`、`since`、`sort`（`relevance` か `date`）、`path`（glob の配列）、`json`、`all`、`no_aliases`。出力も CLI と同じです
 - 検索は CLI と同じく常駐プロセスを使います（`--no-daemon` を付ければ使いません）。ファイルの変更はすぐに反映します
 
 Claude Code では、バンドルを持つリポジトリの `.mcp.json` に書きます（`okfast` に PATH が通っていなければ、実行ファイルのパスを書きます）。

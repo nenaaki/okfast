@@ -4,15 +4,20 @@
 //!
 //! - 結果の 1 件は節（[`crate::sections`]）。節が `max_lines` より長いときは、当たった行の前後 `window` 行を
 //!   切り出す（重なる・隣り合う切り出しはつなぐ）
-//! - 行の点は BM25。行を 1 つの文書とし、語ごとの idf（ありふれた語は軽い）と行の長さで決める。tf は 0/1
-//! - 範囲の点は、語ごとに範囲の中で最も高い行の点を取り、足したもの（同じ語の繰り返しで長い節が上がりすぎない）
-//! - 順位は、主題のページ（辞書の boost）→ 範囲に当たった語の種類が多い → 題名に当たったページ → 点、の順
+//! - 行の点は BM25。行を 1 つの文書とし、語ごとの idf（ありふれた語は軽い）と行の長さで決める。tf は 0/1。
+//!   脚注の定義の行（`skip_footnotes`）とリンクの行き先は当たりに数えない
+//! - 主題のページ（`topic_keys` の値か辞書の boost に語が当たったページ）は、当たった語の idf の割合 `share` を
+//!   取り、行の点に `1 + share` を掛ける（全語に当たるページほど強く、1 語だけなら少し上がる）
+//! - 範囲の点は、既定（`decay`）では当たった行の点を高い順に並べて 1・1/2・1/4… を掛けて足す。`max` では
+//!   語ごとに範囲の中で最も高い行の点を取って足す
+//! - 順位は点の高い順（同点なら日付の新しい順）
 //! - 上位 `top` 件（1 ページ `per_page` 件まで）のあとに、日付の新しい範囲を `recent` 件足す
-//! - 必ず読む範囲（主題のページの、見出しが設定の語に当たる節と、決まったページの上位）を先頭に出す
+//! - 必ず読む範囲（`share` の高い主題のページの、見出しが設定の語に当たる節と、決まったページの上位）を
+//!   先頭に出す
 
 use crate::aliases::Dictionary;
 use crate::bundle::{Bundle, Page};
-use crate::config::SearchConfig;
+use crate::config::{SearchConfig, SectionScore};
 use crate::dates::{self, Date};
 use crate::error::Result;
 use crate::normalize::fold;
@@ -44,6 +49,8 @@ pub struct RangeOptions {
     pub since: Option<Date>,
     /// 関連度ではなく日付の新しい順に並べる（新しい記録は足さない）。
     pub sort_date: bool,
+    /// 空でなければ、この glob に当たるページだけを検索する（`exclude` に当たるページも含める）。
+    pub paths: Vec<String>,
 }
 
 /// 範囲の種類。
@@ -99,13 +106,28 @@ pub struct Range<'a> {
     pub date: Option<Date>,
     /// 主題のページ（辞書の boost）の範囲か。
     pub boosted: bool,
-    /// 題名に語が当たったページの範囲か。
-    pub title_hit: bool,
+    /// ページの主題の度合い（`topic_keys` の値と辞書の boost に当たった語の idf の割合。0〜1）。
+    pub topic: f64,
     /// 種類。
     pub kind: Kind,
 }
 
-impl Range<'_> {
+impl<'a> Range<'a> {
+    /// 節の見出しの階層（いちばん上の祖先から節の見出しまで。最初の見出しより前なら空）。
+    pub fn headings(&self) -> Vec<&'a str> {
+        let o = self.page.outline();
+        let first = self.page.body_line();
+        let Some(h) = o
+            .section_of(self.section.0 - first)
+            .and_then(|i| o.sections[i].heading)
+        else {
+            return Vec::new();
+        };
+        let mut v: Vec<&'a str> = o.ancestors(h).map(|x| x.text.as_str()).collect();
+        v.reverse();
+        v
+    }
+
     fn overlaps(&self, o: &Range<'_>) -> bool {
         self.rel == o.rel && self.from <= o.to && o.from <= self.to
     }
@@ -126,6 +148,8 @@ pub struct RangeResult<'a> {
     pub lines_per_term: Vec<usize>,
     /// 主題のページ（当たったもの）。
     pub boosted: Vec<&'a str>,
+    /// 主題のページ（主題の度合いが 0 より大きい当たったページ）と度合い。度合いの高い順。
+    pub topics: Vec<(&'a str, f64)>,
     /// 検索したページ数。
     pub searched: usize,
     /// 除外したページ数。
@@ -146,7 +170,8 @@ struct PageHits<'a> {
     rel: &'a str,
     page: &'a Page,
     boosted: bool,
-    title_hit: bool,
+    /// 主題の度合い（0〜1）。
+    share: f64,
     hits: Vec<RangeHit<'a>>,
     /// 語ごとの点（hits と同じ順。語 i の点は `per_term[k][i]`、当たっていなければ 0）。
     per_term: Vec<Vec<f64>>,
@@ -164,9 +189,17 @@ pub fn search_ranges<'a>(
     opt: &RangeOptions,
 ) -> Result<RangeResult<'a>> {
     let exclude = compile_globset(&cfg.exclude)?;
-    let is_excluded = |rel: &str| !opt.include_all && exclude.is_match(rel);
+    let paths = compile_globset(&opt.paths)?;
+    let scoped = !opt.paths.is_empty();
+    let is_excluded = |rel: &str| {
+        if scoped {
+            !paths.is_match(rel)
+        } else {
+            !opt.include_all && exclude.is_match(rel)
+        }
+    };
     // 決まったページは exclude に当たっても見るので、そのときは全部を検索して自分で除く
-    let need_all = !opt.include_all && !cfg.must_read.pages.is_empty();
+    let need_all = !scoped && !opt.include_all && !cfg.must_read.pages.is_empty();
     let r = search::search(
         bundle,
         dict,
@@ -179,6 +212,10 @@ pub fn search_ranges<'a>(
             },
             include_all: opt.include_all,
             short_max: opt.short_max,
+            paths: opt.paths.clone(),
+            topic_keys: cfg.topic_keys.clone(),
+            skip_footnotes: cfg.sections.skip_footnotes,
+            skip_link_targets: true,
         },
     )?;
     let (searched, excluded) = if need_all {
@@ -233,6 +270,20 @@ pub fn search_ranges<'a>(
             (1.0 + (n - d + 0.5) / (d + 0.5)).ln()
         })
         .collect();
+    let idf_sum: f64 = idf.iter().sum();
+    // 主題の度合い: topic_keys の値か辞書の boost に当たった語の idf の割合
+    let share_of = |f: &FileHits<'a>| -> f64 {
+        if idf_sum <= 0.0 {
+            return 0.0;
+        }
+        let got: f64 = (0..n_terms)
+            .filter(|&t| {
+                f.topic_terms & (1 << t) != 0
+                    || q.terms[t].expansion.boost.iter().any(|b| b == f.rel)
+            })
+            .fold(0.0, |acc, t| acc + idf[t]);
+        got / idf_sum
+    };
 
     let sources = cfg.recent.sources();
     let pages: Vec<PageHits<'a>> = kept
@@ -241,6 +292,8 @@ pub fn search_ranges<'a>(
             let page = f.page;
             let ix = page.text_index();
             let first = page.body_line();
+            let share = share_of(f);
+            let mult = 1.0 + share;
             let line_dates = (!sources.is_empty())
                 .then(|| dates::cached_line_dates(page, &sources, &cfg.recent.table_columns));
             let mut per_term = Vec::with_capacity(hs.len());
@@ -254,7 +307,7 @@ pub fn search_ranges<'a>(
                     let scores: Vec<f64> = (0..n_terms)
                         .map(|t| {
                             if h.terms & (1 << t) != 0 {
-                                idf[t] * norm
+                                idf[t] * norm * mult
                             } else {
                                 0.0
                             }
@@ -275,7 +328,7 @@ pub fn search_ranges<'a>(
                 rel: f.rel,
                 page,
                 boosted: f.boosted,
-                title_hit: f.title_terms != 0,
+                share,
                 hits,
                 per_term,
                 dates: line_dates,
@@ -295,6 +348,7 @@ pub fn search_ranges<'a>(
         }
     }
 
+    let score_mode = cfg.sections.score;
     // 必ず読む範囲
     let mut must: Vec<Range<'a>> = Vec::new();
     let words: Vec<String> = cfg
@@ -304,12 +358,18 @@ pub fn search_ranges<'a>(
         .map(|w| fold(w))
         .filter(|w| !w.is_empty())
         .collect();
+    let mut topics: Vec<&PageHits<'a>> = pages
+        .iter()
+        .filter(|p| !p.excluded && p.share > 0.0)
+        .collect();
+    topics.sort_by(|a, b| {
+        b.share
+            .total_cmp(&a.share)
+            .then(b.hits.len().cmp(&a.hits.len()))
+            .then(a.rel.cmp(b.rel))
+    });
     if !words.is_empty() && cfg.must_read.topics > 0 {
-        let topics = pages
-            .iter()
-            .filter(|p| !p.excluded && (p.boosted || p.title_hit))
-            .take(cfg.must_read.topics);
-        for p in topics {
+        for p in topics.iter().take(cfg.must_read.topics) {
             let o = p.page.outline();
             for s in &o.sections {
                 let Some(h) = s.heading else { continue };
@@ -319,7 +379,7 @@ pub fn search_ranges<'a>(
                 }
                 let max = cfg.must_read.max_lines.max(1);
                 let end = s.end.min(s.start + max - 1);
-                let mut rg = make_range(p, s.start, end, s, n_terms);
+                let mut rg = make_range(p, s.start, end, s, n_terms, score_mode);
                 rg.partial = end < s.end;
                 rg.kind = Kind::Must;
                 push_unique(&mut must, rg);
@@ -327,14 +387,24 @@ pub fn search_ranges<'a>(
         }
     }
     let ranges_of = |p: &PageHits<'a>| -> Vec<Range<'a>> {
-        page_ranges(p, cfg.sections.max_lines, cfg.sections.window, n_terms)
+        page_ranges(
+            p,
+            cfg.sections.max_lines,
+            cfg.sections.window,
+            n_terms,
+            score_mode,
+        )
     };
     for mp in &cfg.must_read.pages {
         let g = compile_glob(&mp.path)?.compile_matcher();
         let mut found: Vec<Range<'a>> = pages
             .iter()
-            .filter(|p| g.is_match(p.rel))
-            .flat_map(&ranges_of)
+            .filter(|p| g.is_match(p.rel) && !(scoped && p.excluded))
+            .flat_map(|p| match mp.window {
+                // 節の長さによらず、当たった行の前後だけを切り出す
+                Some(w) => page_ranges(p, 0, w, n_terms, score_mode),
+                None => ranges_of(p),
+            })
             .collect();
         found.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.from.cmp(&b.from)));
         for mut rg in found.into_iter().take(mp.top) {
@@ -344,7 +414,6 @@ pub fn search_ranges<'a>(
     }
 
     // 候補
-    let boost = q.boost();
     let mut cands: Vec<Range<'a>> = pages
         .iter()
         .filter(|p| !p.excluded)
@@ -355,7 +424,6 @@ pub fn search_ranges<'a>(
     if let Some(since) = opt.since {
         cands.retain(|c| c.date.is_some_and(|d| d >= since));
     }
-    let boost_pos = |rel: &str| boost.iter().position(|b| b == rel).unwrap_or(usize::MAX);
     if opt.sort_date {
         cands.sort_by(|a, b| {
             b.date
@@ -366,11 +434,9 @@ pub fn search_ranges<'a>(
         });
     } else {
         cands.sort_by(|a, b| {
-            boost_pos(a.rel)
-                .cmp(&boost_pos(b.rel))
-                .then(b.terms.count_ones().cmp(&a.terms.count_ones()))
-                .then(b.title_hit.cmp(&a.title_hit))
-                .then(b.score.total_cmp(&a.score))
+            b.score
+                .total_cmp(&a.score)
+                .then(b.date.cmp(&a.date))
                 .then(a.rel.cmp(b.rel))
                 .then(a.from.cmp(&b.from))
         });
@@ -450,6 +516,7 @@ pub fn search_ranges<'a>(
             .filter(|p| !p.excluded && p.boosted)
             .map(|p| p.rel)
             .collect(),
+        topics: topics.iter().map(|p| (p.rel, p.share)).collect(),
         searched,
         excluded,
         dated: !sources.is_empty(),
@@ -463,11 +530,15 @@ fn push_unique<'a>(v: &mut Vec<Range<'a>>, rg: Range<'a>) {
 }
 
 /// ページの当たりを節・切り出しの範囲にまとめる。
+///
+/// `max_lines` が 0 なら、節の長さによらず切り出す。`window` が 0 なら当たった行だけを範囲にし、隣り合う行も
+/// つながない（1 行 1 件の表の行を別々に出す）。
 fn page_ranges<'a>(
     p: &PageHits<'a>,
     max_lines: usize,
     window: usize,
     n_terms: usize,
+    mode: SectionScore,
 ) -> Vec<Range<'a>> {
     let page = p.page;
     let o = page.outline();
@@ -483,8 +554,8 @@ fn page_ranges<'a>(
         while j < p.hits.len() && p.hits[j].line - first < next {
             j += 1;
         }
-        if s.len() <= max_lines.max(1) {
-            out.push(make_range(p, s.start, s.end.max(line), s, n_terms));
+        if max_lines > 0 && s.len() <= max_lines {
+            out.push(make_range(p, s.start, s.end.max(line), s, n_terms, mode));
         } else {
             // 当たった行の前後を切り出し、重なる・隣り合うものはつなぐ
             let mut cur: Option<(usize, usize)> = None;
@@ -494,10 +565,12 @@ fn page_ranges<'a>(
                     l.saturating_sub(window).max(s.start),
                     (l + window).min(s.end).max(l),
                 );
+                // 重なる切り出しはつなぐ。前後を含めるときは隣り合うものもつなぐ
+                let gap = usize::from(window > 0);
                 cur = match cur {
-                    Some((a, b)) if w.0 <= b + 1 => Some((a, b.max(w.1))),
+                    Some((a, b)) if w.0 <= b + gap => Some((a, b.max(w.1))),
                     Some((a, b)) => {
-                        let mut rg = make_range(p, a, b, s, n_terms);
+                        let mut rg = make_range(p, a, b, s, n_terms, mode);
                         rg.partial = true;
                         out.push(rg);
                         Some(w)
@@ -506,7 +579,7 @@ fn page_ranges<'a>(
                 };
             }
             if let Some((a, b)) = cur {
-                let mut rg = make_range(p, a, b, s, n_terms);
+                let mut rg = make_range(p, a, b, s, n_terms, mode);
                 rg.partial = true;
                 out.push(rg);
             }
@@ -523,20 +596,33 @@ fn make_range<'a>(
     end: usize,
     s: &crate::sections::Section,
     n_terms: usize,
+    mode: SectionScore,
 ) -> Range<'a> {
     let page = p.page;
     let first = page.body_line();
     let (from, to) = (first + start, first + end);
     let lo = p.hits.partition_point(|h| h.line < from);
     let hi = p.hits.partition_point(|h| h.line <= to);
-    let mut best = vec![0.0f64; n_terms];
-    for row in &p.per_term[lo..hi] {
-        for (b, &v) in best.iter_mut().zip(row) {
-            if v > *b {
-                *b = v;
+    let score = match mode {
+        SectionScore::Max => {
+            let mut best = vec![0.0f64; n_terms];
+            for row in &p.per_term[lo..hi] {
+                for (b, &v) in best.iter_mut().zip(row) {
+                    if v > *b {
+                        *b = v;
+                    }
+                }
             }
+            best.iter().sum()
         }
-    }
+        SectionScore::Decay => {
+            let mut sc: Vec<f64> = p.hits[lo..hi].iter().map(|h| h.score).collect();
+            sc.sort_by(|a, b| b.total_cmp(a));
+            sc.iter()
+                .fold((0.0, 1.0), |(acc, w), x| (acc + x * w, w * 0.5))
+                .0
+        }
+    };
     let hits: Vec<RangeHit<'a>> = p.hits[lo..hi].to_vec();
     let o = page.outline();
     Range {
@@ -552,10 +638,10 @@ fn make_range<'a>(
             .dates
             .as_ref()
             .and_then(|d| d[start..=end].iter().flatten().max().copied()),
-        score: best.iter().sum(),
+        score,
         hits,
         boosted: p.boosted,
-        title_hit: p.title_hit,
+        topic: p.share,
         kind: Kind::Top,
     }
 }

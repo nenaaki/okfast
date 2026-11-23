@@ -83,6 +83,14 @@ pub struct Options {
     pub include_all: bool,
     /// 短い略語の最大文字数。
     pub short_max: usize,
+    /// 空でなければ、この glob に当たるページだけを検索する（`exclude` に当たるページも含める）。
+    pub paths: Vec<String>,
+    /// 主題のページかを決める frontmatter のキー（[`FileHits::topic_terms`]）。空なら調べない。
+    pub topic_keys: Vec<String>,
+    /// 脚注の定義の行（`[^id]: …`）を当たりにしない。
+    pub skip_footnotes: bool,
+    /// リンクの行き先（`](…)` の中）だけに当たった語を数えない。
+    pub skip_link_targets: bool,
 }
 
 /// 当たった行。
@@ -111,6 +119,8 @@ pub struct FileHits<'a> {
     pub terms: u64,
     /// 題名に当たった語。
     pub title_terms: u64,
+    /// `topic_keys` の値に当たった語（[`Options::topic_keys`] が空なら 0）。
+    pub topic_terms: u64,
     /// 当たった行のうち、見出し（`#` で始まる行）の数。
     pub heading_hits: usize,
 }
@@ -282,6 +292,21 @@ impl Matcher {
         mask
     }
 
+    /// 当たった行の語を、本文として数えるものに絞る（脚注の定義の行・リンクの行き先を除く）。
+    /// 残らなければ `None`。
+    #[inline]
+    fn body_terms(&self, text: &str, terms: u64, opt: &Options) -> Option<u64> {
+        if opt.skip_footnotes && crate::markdown::footnote_def(text).is_some() {
+            return None;
+        }
+        let terms = if opt.skip_link_targets && text.contains("](") {
+            self.text_mask(&crate::markdown::strip_link_targets(text)) & terms
+        } else {
+            terms
+        };
+        (terms != 0).then_some(terms)
+    }
+
     /// ページの当たった行を（0 始まりの行, 語のビット）で返す。行の昇順・重複なし。
     fn page_hits(&self, page: &Page, found: &mut Vec<(u32, u64)>) {
         found.clear();
@@ -341,10 +366,17 @@ pub fn search<'a>(
         return Err(Error::Query("検索語は 64 個まで".into()));
     }
     let exclude = compile_globset(&opt.exclude)?;
+    let paths = compile_globset(&opt.paths)?;
     let targets: Vec<_> = bundle
         .pages
         .iter()
-        .filter(|p| opt.include_all || !exclude.is_match(&p.rel))
+        .filter(|p| {
+            if opt.paths.is_empty() {
+                opt.include_all || !exclude.is_match(&p.rel)
+            } else {
+                paths.is_match(&p.rel)
+            }
+        })
         .collect();
     let excluded = bundle.pages.len() - targets.len();
 
@@ -381,19 +413,37 @@ pub fn search<'a>(
         let first = page.body_line();
         let hits: Vec<LineHit<'a>> = found
             .iter()
-            .map(|&(i, terms)| LineHit {
-                line: first + i as usize,
-                text: ix.line(body, i as usize),
-                terms,
+            .filter_map(|&(i, terms)| {
+                let text = ix.line(body, i as usize);
+                let terms = m.body_terms(text, terms, opt)?;
+                Some(LineHit {
+                    line: first + i as usize,
+                    text,
+                    terms,
+                })
             })
             .collect();
+        if hits.is_empty() {
+            return None;
+        }
         let title_terms = m.text_mask(&page.title());
+        let topic_terms = opt.topic_keys.iter().fold(0, |acc, k| {
+            if k == "title" {
+                acc | title_terms
+            } else {
+                page.frontmatter()
+                    .strings(k)
+                    .iter()
+                    .fold(acc, |a, v| a | m.text_mask(v))
+            }
+        });
         Some(FileHits {
             rel: page.rel.as_str(),
             page,
             boosted: boost.contains(&page.rel),
             terms: hits.iter().fold(title_terms, |a, h| a | h.terms),
             title_terms,
+            topic_terms,
             heading_hits: hits
                 .iter()
                 .filter(|h| h.text.trim_start().starts_with('#'))

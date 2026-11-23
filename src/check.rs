@@ -513,11 +513,38 @@ fn check_search(bundle: &Bundle, config: &Config, report: &mut Report) -> Result
     Ok(())
 }
 
-/// `okfast search` の設定（show_keys・[search.recent]・[search.must_read]）を確かめる。
+/// `okfast search` の設定（show_keys・topic_keys・[search.recent]・[search.must_read]）を確かめる。
 fn check_search_ranges(bundle: &Bundle, config: &Config, report: &mut Report) -> Result<()> {
     let sc = &config.search;
     let recent = &sc.recent;
     let must = &sc.must_read;
+
+    {
+        let mut s = SectionBuilder::new(format!(
+            "[search] topic_keys = [{}]",
+            sc.topic_keys.join(", ")
+        ));
+        if sc.topic_keys.is_empty() {
+            s.info("主題のページは辞書の boost だけで決める");
+        }
+        for k in &sc.topic_keys {
+            let n = bundle
+                .pages
+                .iter()
+                .filter(|p| !p.frontmatter().strings(k).is_empty())
+                .count();
+            if n == 0 && k != "title" {
+                s.warn(format!("キー {k} を持つページがない"));
+            } else if k == "title" {
+                s.info(format!(
+                    "キー title を持つページ: {n}（ないページはファイル名を使う）"
+                ));
+            } else {
+                s.info(format!("キー {k} を持つページ: {n}"));
+            }
+        }
+        report.sections.push(s.0);
+    }
 
     if !sc.show_keys.is_empty() {
         let mut s = SectionBuilder::new("[search] show_keys");
@@ -582,6 +609,33 @@ fn check_search_ranges(bundle: &Bundle, config: &Config, report: &mut Report) ->
         if !any && !recent.date_sources.is_empty() {
             s.info("`okfast config init` が、バンドルにある日付の書き方を提案する");
         }
+        if recent.sources().contains(&dates::DateSource::TableRow) {
+            // 年のない日付（M-D・M/D）は generated.at の年で読む。generated.at がないページでは読めない
+            let mut missing: Vec<String> = Vec::new();
+            for p in bundle
+                .pages
+                .iter()
+                .filter(|p| dates::generated_at(p).is_none())
+            {
+                for t in markdown::tables(p.body_lines()) {
+                    if let Some(r) = t.rows.iter().find(|r| {
+                        r.cells
+                            .first()
+                            .is_some_and(|c| dates::month_day(c, 20000101).is_some())
+                    }) {
+                        missing.push(format!("{}:{}", p.rel, r.line));
+                        break;
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                s.warn(format!(
+                    "表の 1 列目に年のない日付があるが、generated.at がないので年が分からず読めないページ: {}（{}）",
+                    missing.len(),
+                    list(&missing)
+                ));
+            }
+        }
         for c in &recent.table_columns {
             let found = bundle.pages.iter().any(|p| {
                 markdown::tables(p.body_lines())
@@ -644,8 +698,13 @@ fn check_search_ranges(bundle: &Bundle, config: &Config, report: &mut Report) ->
             if hits.is_empty() {
                 s.warn(format!("pages の path「{}」に当たるページがない", mp.path));
             } else {
+                let how = match mp.window {
+                    None => String::new(),
+                    Some(0) => "。当たった行だけ".to_string(),
+                    Some(w) => format!("。当たった行の前後 {w} 行"),
+                };
                 s.info(format!(
-                    "pages の path「{}」: {} ページ（上位 {} 範囲を出す）",
+                    "pages の path「{}」: {} ページ（上位 {} 範囲を出す{how}）",
                     mp.path,
                     hits.len(),
                     mp.top

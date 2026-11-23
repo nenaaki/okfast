@@ -136,7 +136,7 @@ fn tools(root: &str) -> Value {
             "description": format!(
                 "OKF バンドル（{root}）で、問いに答えるために読む範囲を探す。結果の 1 件は見出しで区切った節で、\
                  `パス:開始行-終了行［日付｜§見出し］` と当たった行の抜粋。答えの行に語がなくても、同じ節に当たりがあれば\
-                 範囲に入る。順位は BM25（珍しい語ほど重い）で、主題のページを優先する。必ず読む範囲（設定した見出しの節）と、\
+                 範囲に入る。順位は BM25（珍しい語ほど重い）で、題名などに語が入る主題のページは点が上がる。必ず読む範囲（設定した見出しの節）と、\
                  日付の新しい範囲も足す。範囲は Read の offset・limit でそのまま読む。言い換えは grep と同じ。"
             ),
             "inputSchema": {
@@ -150,6 +150,7 @@ fn tools(root: &str) -> Value {
                     "sort": {"type": "string", "enum": ["relevance", "date"], "description": "並べ方（既定 relevance）"},
                     "json": {"type": "boolean", "description": "結果を 1 行の JSON で出す（プログラム用）"},
                     "all": {"type": "boolean", "description": "設定の exclude を無視してすべてのページを探す"},
+                    "path": {"type": "array", "items": {"type": "string"}, "description": "この glob に当たるページだけを探す（exclude に当たるページも含める。例: [\"meetings/**\"]）"},
                     "no_aliases": {"type": "boolean", "description": "辞書で言い換えない"}
                 },
                 "required": ["terms"]
@@ -282,6 +283,16 @@ fn search_options(args: &Value) -> Result<SearchOptions, (i64, String)> {
         recent: num("recent")?,
         since: text("since")?,
         sort_date,
+        paths: match args.get("path") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::String(s)) => vec![s.clone()],
+            Some(Value::Array(a)) if a.iter().all(Value::is_string) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            Some(_) => return Err((-32602, "path は glob の文字列か、その配列".to_string())),
+        },
     })
 }
 

@@ -103,6 +103,53 @@ fn split_row(line: &str) -> Vec<String> {
     cells
 }
 
+/// 脚注の定義 `[^id]: 本文` なら（id, 本文）。
+pub fn footnote_def(line: &str) -> Option<(&str, &str)> {
+    let t = line.trim_start();
+    let rest = t.strip_prefix("[^")?;
+    let close = rest.find("]:")?;
+    Some((&rest[..close], &rest[close + 2..]))
+}
+
+/// リンクの行き先 `](...)` を取り除き、`]` だけを残す（`[表示](行き先)` → `[表示]`）。行き先の中の括弧の
+/// 組は数える。閉じていない `](` はそのまま残す。リンクがなければ借りたまま返す。
+pub fn strip_link_targets(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains("](") {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("](") {
+        let after = &rest[i + 2..];
+        let mut depth = 1usize;
+        let close = after.char_indices().find_map(|(k, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(k);
+                    }
+                }
+                _ => {}
+            }
+            None
+        });
+        match close {
+            Some(k) => {
+                out.push_str(&rest[..=i]);
+                rest = &after[k + 1..];
+            }
+            None => {
+                out.push_str(&rest[..i + 2]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 /// 脚注参照 `[^id]` を取り除く。
 pub fn strip_footnotes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -254,6 +301,24 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn footnotes_and_link_targets() {
+        assert_eq!(
+            footnote_def("[^m1]: meetings/2026-01-15.md"),
+            Some(("m1", " meetings/2026-01-15.md"))
+        );
+        assert_eq!(footnote_def("本文[^m1]"), None);
+        assert_eq!(
+            strip_link_targets("[価格](/pricing/price.md) と [x](a(b)c) の後"),
+            "[価格] と [x] の後"
+        );
+        assert_eq!(strip_link_targets("閉じない](abc"), "閉じない](abc");
+        assert!(matches!(
+            strip_link_targets("リンクなし"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 
     #[test]
     fn parse_tables() {

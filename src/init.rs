@@ -530,14 +530,20 @@ fn write_search_ranges(o: &mut String, bundle: &Bundle) {
         slot.0 += 1;
         slot.1.get_or_insert(at);
     };
+    let mut described = (0usize, 0usize);
     for p in &bundle.pages {
         let first = p.body_line();
+        let fmv = p.frontmatter();
+        described.0 += usize::from(!fmv.strings("description").is_empty());
+        described.1 += usize::from(!fmv.strings("tags").is_empty());
+        // 年のない日付（M-D・M/D）は generated.at の年で読む
+        let generated = dates::generated_at(p);
         for t in markdown::tables(p.body_lines()) {
             for r in &t.rows {
-                if r.cells
-                    .first()
-                    .is_some_and(|c| dates::newest_in(c).is_some())
-                {
+                if r.cells.first().is_some_and(|c| {
+                    dates::newest_in(c).is_some()
+                        || generated.is_some_and(|g| dates::month_day(c, g).is_some())
+                }) {
                     note(&mut table_rows, format!("{}:{}", p.rel, r.line));
                 }
             }
@@ -569,12 +575,43 @@ fn write_search_ranges(o: &mut String, bundle: &Bundle) {
         o,
         "# okfast search（読む範囲を返す検索）の設定。既定値のままでよければ書かなくてよい"
     );
+    let n = bundle.pages.len();
+    let mut keys = vec!["title".to_string()];
+    if described.0 * 2 >= n && described.0 > 0 {
+        keys.push("description".into());
+    }
+    if described.1 * 2 >= n && described.1 > 0 {
+        keys.push("tags".into());
+    }
+    let _ = writeln!(
+        o,
+        "# 主題のページを決める frontmatter のキー（値に語が当たったページの範囲は点が上がる）"
+    );
+    if keys.len() > 1 {
+        let _ = writeln!(
+            o,
+            "# 根拠: description を持つページ {}・tags を持つページ {}（全 {n}）",
+            described.0, described.1
+        );
+        let _ = writeln!(o, "topic_keys = {}", toml_list(&keys));
+    } else {
+        let _ = writeln!(o, "# topic_keys = [\"title\"]   # 既定");
+    }
+    let _ = writeln!(o);
     let _ = writeln!(o, "# [search.sections]");
     let _ = writeln!(
         o,
         "# max_lines = 40   # これより長い節は、当たった行の前後だけを範囲にする"
     );
     let _ = writeln!(o, "# window    = 4    # その前後の行数");
+    let _ = writeln!(
+        o,
+        "# score     = \"decay\"  # 範囲の点: decay（当たった行の点を 1・1/2・1/4… で足す）か max（語ごとの最高点）"
+    );
+    let _ = writeln!(
+        o,
+        "# skip_footnotes = true  # 脚注の定義の行（[^id]: 出典）を当たりに数えない"
+    );
     let _ = writeln!(o);
 
     let mut sources: Vec<String> = Vec::new();
@@ -644,7 +681,10 @@ fn write_search_ranges(o: &mut String, bundle: &Bundle) {
     );
     let _ = writeln!(o, "# [search.must_read]");
     let _ = writeln!(o, "# headings = [\"<見出しの語>\"]");
-    let _ = writeln!(o, "# pages    = [{{ path = \"<glob>\", top = 3 }}]");
+    let _ = writeln!(
+        o,
+        "# pages    = [{{ path = \"<glob>\", top = 3 }}]   # window = 0 を足すと当たった行だけ（1 行 1 件の表）"
+    );
 }
 
 #[cfg(test)]

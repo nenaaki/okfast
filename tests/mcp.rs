@@ -30,6 +30,7 @@ fn tools_match_cli_output() {
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"aliases","arguments":{"terms":["Widget"]}}}"#,
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"grep","arguments":{"terms":["存在しない語ですよ"]}}}"#,
         r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search","arguments":{"terms":["Widget","sprocket"],"top":1,"all":true}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search","arguments":{"terms":["Widget"],"path":["notes/**","glossary/**"],"json":true}}}"#,
     ];
     let mut child = okfast(&["mcp"], &cache)
         .stdin(Stdio::piped())
@@ -49,7 +50,7 @@ fn tools_match_cli_output() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(resp.len(), 6);
+    assert_eq!(resp.len(), 7);
     let text = |i: usize| {
         resp[i]["result"]["content"][0]["text"]
             .as_str()
@@ -67,6 +68,18 @@ fn tools_match_cli_output() {
     assert_eq!(
         text(5),
         cli(&["search", "Widget", "sprocket", "-n", "1", "--all"])
+    );
+    assert_eq!(
+        text(6),
+        cli(&[
+            "search",
+            "Widget",
+            "--path",
+            "notes/**",
+            "--path",
+            "glossary/**",
+            "--json"
+        ])
     );
     let _ = std::fs::remove_dir_all(&cache);
 }

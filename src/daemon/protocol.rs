@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// 形式の版。変えたら上げる。
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 const MAGIC_REQ: &[u8; 4] = b"OKFQ";
 const MAGIC_RES: &[u8; 4] = b"OKFR";
 /// 1 フレームの上限（壊れた入力で大きなメモリを取らないため）。
@@ -239,6 +239,7 @@ impl Request {
                                 e.str(s);
                             }
                         }
+                        e.strs(&opts.paths);
                     }
                 }
             }
@@ -300,6 +301,7 @@ impl Request {
                                 0 => None,
                                 _ => Some(d.str()?),
                             },
+                            paths: d.strs()?,
                         },
                     },
                     _ => return Err(bad()),
@@ -410,6 +412,7 @@ mod tests {
                             recent: Some(0),
                             since: Some("2026-01-01".into()),
                             top: 3,
+                            paths: vec!["meetings/**".into(), "a/*.md".into()],
                             ..SearchOptions::default()
                         },
                     },
