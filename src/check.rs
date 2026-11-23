@@ -619,9 +619,10 @@ fn check_search_ranges(bundle: &Bundle, config: &Config, report: &mut Report) ->
             {
                 for t in markdown::tables(p.body_lines()) {
                     if let Some(r) = t.rows.iter().find(|r| {
-                        r.cells
-                            .first()
-                            .is_some_and(|c| dates::month_day(c, 20000101).is_some())
+                        r.cells.first().is_some_and(|c| {
+                            dates::cell_date(c, Some(20000101)).is_some()
+                                && dates::cell_date(c, None).is_none()
+                        })
                     }) {
                         missing.push(format!("{}:{}", p.rel, r.line));
                         break;

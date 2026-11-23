@@ -91,6 +91,8 @@ pub struct Options {
     pub skip_footnotes: bool,
     /// リンクの行き先（`](…)` の中）だけに当たった語を数えない。
     pub skip_link_targets: bool,
+    /// 当たった行の中の語ごとの出現回数を数える（[`FileHits::tf`]）。
+    pub count_terms: bool,
 }
 
 /// 当たった行。
@@ -123,6 +125,9 @@ pub struct FileHits<'a> {
     pub topic_terms: u64,
     /// 当たった行のうち、見出し（`#` で始まる行）の数。
     pub heading_hits: usize,
+    /// 当たった行の中の語ごとの出現回数（[`Options::count_terms`] のときだけ）。行 k の語 i は
+    /// `tf[k * 語の数 + i]`。言い換えの語はそれぞれ数えて足す。リンクの行き先は数えない（`skip_link_targets`）。
+    pub tf: Vec<u16>,
 }
 
 impl FileHits<'_> {
@@ -292,6 +297,38 @@ impl Matcher {
         mask
     }
 
+    /// 行の中の語ごとの出現回数を `out`（語の数の長さ）に足す。言い換えの語はそれぞれ数える。
+    /// `folded` は正規化した行（通常の語を数える）、`s` は元の行（短い略語を数える）。
+    fn text_counts(&self, folded: &str, s: &str, out: &mut [u16]) {
+        let add = |out: &mut [u16], bits: u64| {
+            for (i, c) in out.iter_mut().enumerate() {
+                if bits & (1 << i) != 0 {
+                    *c = c.saturating_add(1);
+                }
+            }
+        };
+        if let Some(ac) = &self.ac {
+            for m in ac.find_overlapping_iter(folded) {
+                add(out, self.ac_terms[m.pattern().as_usize()]);
+            }
+        }
+        if !self.shorts.is_empty() {
+            let n = nfkc(s);
+            let n = n.as_bytes();
+            for (finder, bit) in &self.shorts {
+                let len = finder.needle().len();
+                for start in finder.find_iter(n) {
+                    let end = start + len;
+                    if (start == 0 || !n[start - 1].is_ascii_alphanumeric())
+                        && (end == n.len() || !n[end].is_ascii_alphanumeric())
+                    {
+                        add(out, *bit);
+                    }
+                }
+            }
+        }
+    }
+
     /// 当たった行の語を、本文として数えるものに絞る（脚注の定義の行・リンクの行き先を除く）。
     /// 残らなければ `None`。
     #[inline]
@@ -402,6 +439,7 @@ pub fn search<'a>(
     }
 
     let boost = q.boost();
+    let n_terms = q.terms.len();
     let one_page = |page: &'a Page, mask: &u64, found: &mut Vec<(u32, u64)>| {
         let m = &matchers[mask];
         m.page_hits(page, found);
@@ -426,6 +464,26 @@ pub fn search<'a>(
         if hits.is_empty() {
             return None;
         }
+        let mut tf = Vec::new();
+        if opt.count_terms {
+            tf.resize(hits.len() * n_terms, 0);
+            let f = ix.folded();
+            for (row, h) in tf.chunks_exact_mut(n_terms.max(1)).zip(&hits) {
+                // 正規化済みの行は索引から借りる
+                let (ls, le) = ix.folded_line_range(h.line - first);
+                m.text_counts(&f[ls..le], h.text, row);
+                if opt.skip_link_targets && h.text.contains("](") {
+                    // リンクの行き先の中の出現を引く（行き先は短いので、そこだけ正規化する）
+                    let mut sub = vec![0u16; row.len()];
+                    for t in crate::markdown::link_target_texts(h.text) {
+                        m.text_counts(&fold(t), t, &mut sub);
+                    }
+                    for (c, d) in row.iter_mut().zip(&sub) {
+                        *c = c.saturating_sub(*d);
+                    }
+                }
+            }
+        }
         let title_terms = m.text_mask(&page.title());
         let topic_terms = opt.topic_keys.iter().fold(0, |acc, k| {
             if k == "title" {
@@ -449,6 +507,7 @@ pub fn search<'a>(
                 .filter(|h| h.text.trim_start().starts_with('#'))
                 .count(),
             hits,
+            tf,
         })
     };
 

@@ -586,3 +586,149 @@ fn year_less_table_dates_use_generated_at() {
     assert_eq!(v["ranges"][0]["date"], "2027-01-05");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn term_counts_raise_lines_that_repeat_terms() {
+    // 担当の一覧の行には二人の名前と WG 名が並ぶ。会議の行は名前を 1 回出すだけ（同じ長さ）
+    let root = bundle_dir(
+        "tf",
+        &[
+            (
+                "people.md",
+                &format!("{FM}# 担当\n| 山田・佐藤 | 生産 WG、山田が主担当 |\n"),
+            ),
+            (
+                "meeting.md",
+                &format!("{FM}# 議事\n| 報告 | 山田から生産の進み具合 |\n"),
+            ),
+        ],
+    );
+    let terms = ["山田|佐藤", "生産"];
+    let v = json(&root, "", &terms, SearchOptions::default());
+    assert_eq!(v["ranges"][0]["rel"], "people.md", "{v}");
+    let s0 = v["ranges"][0]["score"].as_f64().unwrap();
+    let s1 = v["ranges"][1]["score"].as_f64().unwrap();
+    assert!(s0 > s1, "{s0} {s1}");
+    let gap_count = s0 - s1;
+    // binary なら回数を数えないので、差は長さの違いの分だけになる
+    let v = json(
+        &root,
+        "[search.sections]\ntf = \"binary\"\n",
+        &terms,
+        SearchOptions::default(),
+    );
+    let gap_binary =
+        v["ranges"][0]["score"].as_f64().unwrap() - v["ranges"][1]["score"].as_f64().unwrap();
+    assert!(
+        gap_count > gap_binary.abs() * 2.0,
+        "{gap_count} {gap_binary}"
+    );
+    // リンクの行き先の出現は数えない: 行き先だけが違う同じ長さの行は同じ点
+    let root2 = bundle_dir(
+        "tflink",
+        &[
+            (
+                "a.md",
+                &format!(
+                    "{FM}# A
+山田の担当 [山田](/p/山田.md)
+"
+                ),
+            ),
+            (
+                "b.md",
+                &format!(
+                    "{FM}# B
+山田の担当 [山田](/p/田中.md)
+"
+                ),
+            ),
+        ],
+    );
+    let v = json(&root2, "", &["山田"], SearchOptions::default());
+    let scores: Vec<f64> = v["ranges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["score"].as_f64().unwrap())
+        .collect();
+    assert_eq!(scores.len(), 2, "{v}");
+    assert!((scores[0] - scores[1]).abs() < 1e-9, "{scores:?}");
+    for bad in ["k1 = -1.0", "b = 1.5"] {
+        assert!(Config::parse(&format!("[search.sections]\n{bad}\n"), None).is_err());
+    }
+    assert!(Config::parse("[search.sections]\ntf = \"often\"\n", None).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&root2);
+}
+
+#[test]
+fn recent_comes_from_the_pool_below_the_top() {
+    // 関連度の高い範囲が並び、いちばん下に日付だけ新しい「関連」の節がある
+    let mut pages: Vec<(String, String)> = Vec::new();
+    for i in 0..6 {
+        pages.push((
+            format!("p{i}.md"),
+            format!(
+                "{FM}# 記録 2026-01-0{}\n価格の改定 価格の決め方 {i}\n",
+                i + 1
+            ),
+        ));
+    }
+    pages.push((
+        "plan.md".into(),
+        format!(
+            "{FM}# 2027-06-14 予定\nこの回では、ほかにも多くの議題を扱う予定で、価格の話も少し出るかもしれない。\n"
+        ),
+    ));
+    let refs: Vec<(&str, &str)> = pages
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let root = bundle_dir("pool", &refs);
+    let recent = |cfg: &str| -> Vec<String> {
+        let v = json(
+            &root,
+            cfg,
+            &["価格"],
+            SearchOptions {
+                top: 2,
+                ..SearchOptions::default()
+            },
+        );
+        v["ranges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["recent"] == true)
+            .map(|r| r["rel"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let base = "[search.recent]\ncount = 1\ndate_sources = [\"heading\"]\n";
+    // 上位の次の 2 範囲（p? の 2 つ）から選ぶので、いちばん下の plan.md は選ばない
+    let got = recent(&format!("{base}pool = 2\n"));
+    assert_eq!(got.len(), 1);
+    assert_ne!(got[0], "plan.md");
+    // pool = 0 は全範囲から（従来の動き）
+    assert_eq!(recent(&format!("{base}pool = 0\n")), vec!["plan.md"]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn table_row_uses_only_a_leading_date() {
+    let page = format!(
+        "{FM}# 一覧\n| 内容 | 備考 |\n|---|---|\n| 2026-03-02 価格の改定、ほかにも長い説明 | 済 |\n\
+| 価格の会議、第 6 回は 2027/6/14、ほかにも長い説明 | 予定 |\n"
+    );
+    let root = bundle_dir("celldate", &[("t.md", &page)]);
+    let cfg = "[search.recent]\ndate_sources = [\"table_row\"]\n";
+    let v = json(&root, cfg, &["価格"], SearchOptions::default());
+    let dates: Vec<Value> = v["ranges"][0]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["date"].clone())
+        .collect();
+    assert_eq!(dates, vec![Value::from("2026-03-02"), Value::Null], "{v}");
+    let _ = std::fs::remove_dir_all(&root);
+}

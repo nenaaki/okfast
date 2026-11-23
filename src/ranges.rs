@@ -4,20 +4,22 @@
 //!
 //! - 結果の 1 件は節（[`crate::sections`]）。節が `max_lines` より長いときは、当たった行の前後 `window` 行を
 //!   切り出す（重なる・隣り合う切り出しはつなぐ）
-//! - 行の点は BM25。行を 1 つの文書とし、語ごとの idf（ありふれた語は軽い）と行の長さで決める。tf は 0/1。
+//! - 行の点は BM25。行を 1 つの文書とし、語ごとの idf（ありふれた語は軽い）と行の長さで決める。tf は既定では
+//!   行の中の出現回数（`tf = "count"`。効きは `k1` で頭打ち、行の長さは `b` で補正）、`"binary"` なら 0/1。
 //!   脚注の定義の行（`skip_footnotes`）とリンクの行き先は当たりに数えない
 //! - 主題のページ（`topic_keys` の値か辞書の boost に語が当たったページ）は、当たった語の idf の割合 `share` を
 //!   取り、行の点に `1 + share` を掛ける（全語に当たるページほど強く、1 語だけなら少し上がる）
 //! - 範囲の点は、既定（`decay`）では当たった行の点を高い順に並べて 1・1/2・1/4… を掛けて足す。`max` では
 //!   語ごとに範囲の中で最も高い行の点を取って足す
 //! - 順位は点の高い順（同点なら日付の新しい順）
-//! - 上位 `top` 件（1 ページ `per_page` 件まで）のあとに、日付の新しい範囲を `recent` 件足す
+//! - 上位 `top` 件（1 ページ `per_page` 件まで）のあとに、日付の新しい範囲を `recent` 件足す。候補は上位の次の
+//!   `pool` 範囲（関連度のごく低い予定・出典の範囲を選ばないため）
 //! - 必ず読む範囲（`share` の高い主題のページの、見出しが設定の語に当たる節と、決まったページの上位）を
 //!   先頭に出す
 
 use crate::aliases::Dictionary;
 use crate::bundle::{Bundle, Page};
-use crate::config::{SearchConfig, SectionScore};
+use crate::config::{SearchConfig, SectionScore, TermFrequency};
 use crate::dates::{self, Date};
 use crate::error::Result;
 use crate::normalize::fold;
@@ -26,11 +28,6 @@ use crate::sections::heading_of;
 use crate::selector::{compile_glob, compile_globset};
 use rayon::prelude::*;
 use std::collections::HashMap;
-
-/// BM25 の k1。
-const K1: f64 = 1.2;
-/// BM25 の b。
-const B: f64 = 0.75;
 
 /// 検索の指定。
 #[derive(Debug, Clone, Default)]
@@ -216,6 +213,7 @@ pub fn search_ranges<'a>(
             topic_keys: cfg.topic_keys.clone(),
             skip_footnotes: cfg.sections.skip_footnotes,
             skip_link_targets: true,
+            count_terms: cfg.sections.tf == TermFrequency::Count,
         },
     )?;
     let (searched, excluded) = if need_all {
@@ -244,15 +242,17 @@ pub fn search_ranges<'a>(
         min_chars == 0 || h.text.trim().chars().count() >= min_chars || heading_of(h.text).is_some()
     };
     let mut df = vec![0usize; n_terms];
-    let mut kept: Vec<(&FileHits<'a>, Vec<&LineHit<'a>>, bool)> = Vec::new();
+    // （FileHits の hits の添え字, 行）
+    type Kept<'a, 'b> = Vec<(usize, &'b LineHit<'a>)>;
+    let mut kept: Vec<(&FileHits<'a>, Kept<'a, '_>, bool)> = Vec::new();
     for f in &r.files {
-        let hs: Vec<&LineHit<'a>> = f.hits.iter().filter(|h| keep(h)).collect();
+        let hs: Kept<'a, '_> = f.hits.iter().enumerate().filter(|(_, h)| keep(h)).collect();
         if hs.is_empty() {
             continue;
         }
         let ex = is_excluded(f.rel);
         if !ex {
-            for h in &hs {
+            for (_, h) in &hs {
                 for (i, c) in df.iter_mut().enumerate() {
                     if h.terms & (1 << i) != 0 {
                         *c += 1;
@@ -285,6 +285,8 @@ pub fn search_ranges<'a>(
         got / idf_sum
     };
 
+    let (k1, b) = (cfg.sections.k1, cfg.sections.b);
+
     let sources = cfg.recent.sources();
     let pages: Vec<PageHits<'a>> = kept
         .into_par_iter()
@@ -299,18 +301,21 @@ pub fn search_ranges<'a>(
             let mut per_term = Vec::with_capacity(hs.len());
             let hits = hs
                 .iter()
-                .map(|h| {
+                .map(|&(k, h)| {
                     let i = h.line - first;
                     let (s, e) = ix.folded_line_range(i);
                     let dl = (e - s) as f64;
-                    let norm = (K1 + 1.0) / (1.0 + K1 * (1.0 - B + B * dl / avgdl));
+                    let len = k1 * (1.0 - b + b * dl / avgdl);
                     let scores: Vec<f64> = (0..n_terms)
                         .map(|t| {
-                            if h.terms & (1 << t) != 0 {
-                                idf[t] * norm * mult
-                            } else {
-                                0.0
+                            if h.terms & (1 << t) == 0 {
+                                return 0.0;
                             }
+                            // 当たった語は少なくとも 1 回（数え方の違いで 0 になっても）
+                            let tf =
+                                f.tf.get(k * n_terms + t)
+                                    .map_or(1.0, |&c| f64::from(c.max(1)));
+                            idf[t] * tf * (k1 + 1.0) / (tf + len) * mult
                         })
                         .collect();
                     let score = scores.iter().sum();
@@ -461,8 +466,16 @@ pub fn search_ranges<'a>(
     }
     let mut recent_idx: Vec<usize> = Vec::new();
     if !opt.sort_date && opt.recent > 0 {
+        // 候補は、上位に入らなかった範囲の先頭から pool 個（0 はすべて）
+        let pool = if cfg.recent.pool == 0 {
+            usize::MAX
+        } else {
+            cfg.recent.pool
+        };
         let mut idx: Vec<usize> = (0..cands.len())
-            .filter(|&i| !chosen[i] && cands[i].date.is_some())
+            .filter(|&i| !chosen[i])
+            .take(pool)
+            .filter(|&i| cands[i].date.is_some())
             .collect();
         idx.sort_by(|&a, &b| {
             cands[b]
