@@ -1,9 +1,11 @@
 name: Release
 
-# v で始まるタグ（例: v0.1.0）を push すると、Windows 版と Linux 版を作って GitHub Releases に置く
+# v で始まるタグ（例: v0.1.0）を push すると、Windows 版と Linux 版を作って GitHub Releases に置く。
+# 手動で実行すると（workflow_dispatch）、作ってチェックサムを出すところまでを試し、公開はしない
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +26,7 @@ jobs:
             exe: okfast
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup target add ${{ matrix.target }}
@@ -33,7 +35,8 @@ jobs:
       - name: package
         shell: bash
         run: |
-          name="okfast-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          # 手動実行ではブランチ名（ci/foo など）になるので、/ を - にする
+          name="okfast-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" README.md LICENSE "$name/"
           cp -r skills "$name/"
@@ -42,7 +45,7 @@ jobs:
           else
             tar czf "$name.tar.gz" "$name"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -55,13 +58,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
       - name: checksums
         run: cd dist && sha256sum okfast-* > SHA256SUMS.txt
       - name: create release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

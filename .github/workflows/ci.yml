@@ -17,7 +17,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # ツールチェーンは rust-toolchain.toml に従って rustup が入れる
       - run: rustup show
       - run: cargo fmt --all --check
@@ -28,6 +28,6 @@ jobs:
     name: msrv (1.85)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install 1.85 --profile minimal
       - run: cargo +1.85 check --all-targets
