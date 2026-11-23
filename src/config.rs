@@ -165,6 +165,9 @@ pub struct SearchConfig {
     /// `search` で必ず出す範囲。
     #[serde(default)]
     pub must_read: MustReadConfig,
+    /// `search` で出す、日付つきの行の時系列の一覧。
+    #[serde(default)]
+    pub timeline: TimelineConfig,
 }
 
 impl Default for SearchConfig {
@@ -176,6 +179,7 @@ impl Default for SearchConfig {
             sections: SectionsConfig::default(),
             recent: RecentConfig::default(),
             must_read: MustReadConfig::default(),
+            timeline: TimelineConfig::default(),
         }
     }
 }
@@ -315,6 +319,58 @@ impl Default for MustReadConfig {
     }
 }
 
+/// `search` で出す、日付つきの行の時系列の一覧。行の意味（決定・結論など）は okfast には分からないので、
+/// 種類と変更の印はパターン（部分一致の文字列）で宣言させる。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineConfig {
+    /// 一覧に出す行の数の上限（`okfast search --timeline N` で変えられる。0 なら出さない）。
+    #[serde(default = "default_timeline_max")]
+    pub max: usize,
+    /// 行の種類。行にパターンがあれば、その名前を付ける（先に書いたものから）。
+    #[serde(default)]
+    pub kinds: Vec<TimelineKind>,
+    /// 変更の印。行にこのパターンがあれば、後の日付の記録で変更されたとみなす。`{date}` の部分を変更先の
+    /// 日付として読む。
+    #[serde(default)]
+    pub superseded: Vec<String>,
+    /// 種類の付いた行（と変更の印のある行）だけを一覧に出す。`false` なら日付の取れる行すべて。
+    #[serde(default = "default_true")]
+    pub kinds_only: bool,
+    /// 検索語に当たった行（と変更の印のある行）だけを一覧に出す。`false` なら返した範囲の行すべて。
+    #[serde(default = "default_true")]
+    pub hits_only: bool,
+}
+
+impl Default for TimelineConfig {
+    fn default() -> Self {
+        TimelineConfig {
+            max: default_timeline_max(),
+            kinds: Vec::new(),
+            superseded: Vec::new(),
+            kinds_only: true,
+            hits_only: true,
+        }
+    }
+}
+
+impl TimelineConfig {
+    /// 一覧に出せる行があるか（種類か変更の印が宣言されているか、`kinds_only = false`）。`hits_only` は見ない。
+    pub fn is_declared(&self) -> bool {
+        !self.kinds.is_empty() || !self.superseded.is_empty() || !self.kinds_only
+    }
+}
+
+/// 時系列の一覧の行の種類。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineKind {
+    /// 種類の名前（例: `decision`）。
+    pub name: String,
+    /// 行にこの文字列があれば、この種類にする。
+    pub pattern: String,
+}
+
 /// 当たった範囲の上位を必ず出すページ。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -341,6 +397,9 @@ fn default_window() -> usize {
 }
 fn default_recent_pool() -> usize {
     60
+}
+fn default_timeline_max() -> usize {
+    30
 }
 fn default_k1() -> f64 {
     1.2
@@ -388,6 +447,25 @@ impl Config {
         }
         for p in &c.search.must_read.pages {
             crate::selector::compile_glob(&p.path)?;
+        }
+        let tl = &c.search.timeline;
+        for k in &tl.kinds {
+            if k.name.trim().is_empty() || k.pattern.is_empty() {
+                return Err(err(format!(
+                    "[search.timeline] kinds の name・pattern は空にできない（name = \"{}\", pattern = \"{}\"）",
+                    k.name, k.pattern
+                )));
+            }
+        }
+        for p in &tl.superseded {
+            if p.is_empty()
+                || p == crate::timeline::DATE_SLOT
+                || p.matches(crate::timeline::DATE_SLOT).count() > 1
+            {
+                return Err(err(format!(
+                    "[search.timeline] superseded の「{p}」は読めない（{{date}} のほかに文字が要り、{{date}} は 1 つまで）"
+                )));
+            }
         }
         let sc = &c.search.sections;
         if !(sc.k1.is_finite() && sc.k1 >= 0.0) {

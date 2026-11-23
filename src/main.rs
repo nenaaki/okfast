@@ -111,6 +111,15 @@ enum Command {
         /// この glob に当たるページだけを検索する（複数可。exclude に当たるページも含める）。
         #[arg(long = "path", value_name = "GLOB")]
         paths: Vec<String>,
+        /// 必ず読む範囲と、関連度の上位 N 範囲の本文（行番号つき）を返す（0 は返さない）。
+        #[arg(long, value_name = "N", default_value_t = 0)]
+        body: usize,
+        /// 返す本文の合計行数の上限。超えた範囲から下は抜粋だけ（Read で読む）。
+        #[arg(long, value_name = "M", default_value_t = command::SearchOptions::BODY_LINES)]
+        body_lines: usize,
+        /// 返した範囲の日付つきの行の時系列の一覧に出す行の数（省略時は設定の [search.timeline] max。0 は出さない）。
+        #[arg(long, value_name = "N")]
+        timeline: Option<usize>,
     },
     /// 語がどう言い換えられるかを表示する。
     Aliases {
@@ -274,6 +283,9 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
             since,
             sort,
             paths,
+            body,
+            body_lines,
+            timeline,
         } => command::Command::Search {
             terms: terms.clone(),
             opts: command::SearchOptions {
@@ -286,6 +298,9 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
                 since: since.clone(),
                 sort_date: sort == "date",
                 paths: paths.clone(),
+                body: *body,
+                body_lines: *body_lines,
+                timeline: *timeline,
             },
         },
         Command::Grep {

@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 /// 形式の版。変えたら上げる。
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 const MAGIC_REQ: &[u8; 4] = b"OKFQ";
 const MAGIC_RES: &[u8; 4] = b"OKFR";
 /// 1 フレームの上限（壊れた入力で大きなメモリを取らないため）。
@@ -40,8 +40,8 @@ pub enum RequestBody {
         config: Option<PathBuf>,
         /// 内訳を標準エラーに出す。
         stats: bool,
-        /// コマンド。
-        command: Command,
+        /// コマンド（大きいので箱に入れる）。
+        command: Box<Command>,
     },
 }
 
@@ -187,7 +187,7 @@ impl Request {
                     }
                 }
                 e.u8(u8::from(*stats));
-                match command {
+                match &**command {
                     Command::Grep { terms, opts } => {
                         e.u8(0);
                         e.strs(terms);
@@ -240,6 +240,16 @@ impl Request {
                             }
                         }
                         e.strs(&opts.paths);
+                        for n in [opts.body, opts.body_lines] {
+                            e.u32(u32::try_from(n).unwrap_or(u32::MAX));
+                        }
+                        match opts.timeline {
+                            None => e.u8(0),
+                            Some(n) => {
+                                e.u8(1);
+                                e.u32(u32::try_from(n).unwrap_or(u32::MAX));
+                            }
+                        }
                     }
                 }
             }
@@ -302,6 +312,12 @@ impl Request {
                                 _ => Some(d.str()?),
                             },
                             paths: d.strs()?,
+                            body: d.u32()? as usize,
+                            body_lines: d.u32()? as usize,
+                            timeline: match d.u8()? {
+                                0 => None,
+                                _ => Some(d.u32()? as usize),
+                            },
                         },
                     },
                     _ => return Err(bad()),
@@ -310,7 +326,7 @@ impl Request {
                     root,
                     config,
                     stats,
-                    command,
+                    command: Box::new(command),
                 }
             }
             _ => return Err(bad()),
@@ -385,7 +401,7 @@ mod tests {
                     root: PathBuf::from("/a/b"),
                     config: Some(PathBuf::from("/c.toml")),
                     stats: true,
-                    command: Command::Grep {
+                    command: Box::new(Command::Grep {
                         terms: vec!["Widget|WP".into(), "検索".into()],
                         opts: GrepOptions {
                             all: true,
@@ -395,7 +411,7 @@ mod tests {
                             max_pages: 0,
                             ..GrepOptions::default()
                         },
-                    },
+                    }),
                 },
             },
             Request {
@@ -404,7 +420,7 @@ mod tests {
                     root: PathBuf::from("r"),
                     config: None,
                     stats: false,
-                    command: Command::Search {
+                    command: Box::new(Command::Search {
                         terms: vec!["価格".into()],
                         opts: SearchOptions {
                             json: true,
@@ -413,9 +429,12 @@ mod tests {
                             since: Some("2026-01-01".into()),
                             top: 3,
                             paths: vec!["meetings/**".into(), "a/*.md".into()],
+                            body: 5,
+                            body_lines: 120,
+                            timeline: Some(0),
                             ..SearchOptions::default()
                         },
-                    },
+                    }),
                 },
             },
             Request {
@@ -424,10 +443,10 @@ mod tests {
                     root: PathBuf::from("r"),
                     config: None,
                     stats: false,
-                    command: Command::Search {
+                    command: Box::new(Command::Search {
                         terms: vec!["a".into()],
                         opts: SearchOptions::default(),
-                    },
+                    }),
                 },
             },
             Request {
@@ -436,10 +455,10 @@ mod tests {
                     root: PathBuf::from("r"),
                     config: None,
                     stats: false,
-                    command: Command::Aliases {
+                    command: Box::new(Command::Aliases {
                         terms: vec!["a".into()],
                         json: true,
-                    },
+                    }),
                 },
             },
         ];

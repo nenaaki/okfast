@@ -693,6 +693,20 @@ fn write_search_ranges(o: &mut String, bundle: &Bundle) {
         o,
         "# pages    = [{{ path = \"<glob>\", top = 3 }}]   # window = 0 を足すと当たった行だけ（1 行 1 件の表）"
     );
+    let _ = writeln!(o);
+    let _ = writeln!(
+        o,
+        "# 返した範囲の日付つきの行の時系列の一覧。行の種類と変更の印は、バンドルの書き方を確かめてから書く"
+    );
+    let _ = writeln!(o, "# [search.timeline]");
+    let _ = writeln!(
+        o,
+        "# kinds      = [{{ name = \"decision\", pattern = \"<決定の印>\" }}]"
+    );
+    let _ = writeln!(
+        o,
+        "# superseded = [\"<変更の印。変更先の日付の部分は {{date}}>\"]"
+    );
 }
 
 #[cfg(test)]

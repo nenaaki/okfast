@@ -151,6 +151,9 @@ fn tools(root: &str) -> Value {
                     "json": {"type": "boolean", "description": "結果を 1 行の JSON で出す（プログラム用）"},
                     "all": {"type": "boolean", "description": "設定の exclude を無視してすべてのページを探す"},
                     "path": {"type": "array", "items": {"type": "string"}, "description": "この glob に当たるページだけを探す（exclude に当たるページも含める。例: [\"meetings/**\"]）"},
+                    "body": {"type": "integer", "minimum": 0, "description": "必ず読む範囲と、関連度の上位のこの数の範囲の本文（行番号つき）を返す（既定 0 は返さない）。返した範囲は Read しなくてよい"},
+                    "body_lines": {"type": "integer", "minimum": 0, "description": format!("返す本文の合計行数の上限（既定 {}）。超えた範囲から下は抜粋だけ（Read で読む）", SearchOptions::BODY_LINES)},
+                    "timeline": {"type": "integer", "minimum": 0, "description": "返した範囲の日付つきの行の時系列の一覧に出す行の数（既定は設定の [search.timeline] max。0 は出さない）"},
                     "no_aliases": {"type": "boolean", "description": "辞書で言い換えない"}
                 },
                 "required": ["terms"]
@@ -283,6 +286,9 @@ fn search_options(args: &Value) -> Result<SearchOptions, (i64, String)> {
         recent: num("recent")?,
         since: text("since")?,
         sort_date,
+        body: num("body")?.unwrap_or(0),
+        body_lines: num("body_lines")?.unwrap_or(SearchOptions::BODY_LINES),
+        timeline: num("timeline")?,
         paths: match args.get("path") {
             None | Some(Value::Null) => Vec::new(),
             Some(Value::String(s)) => vec![s.clone()],

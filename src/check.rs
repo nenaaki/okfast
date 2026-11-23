@@ -714,5 +714,75 @@ fn check_search_ranges(bundle: &Bundle, config: &Config, report: &mut Report) ->
         }
         report.sections.push(s.0);
     }
+
+    let tl = &sc.timeline;
+    if !tl.kinds.is_empty() || !tl.superseded.is_empty() || !tl.kinds_only {
+        let mut s = SectionBuilder::new(format!("[search.timeline] max = {}", tl.max));
+        if recent.date_sources.is_empty() {
+            s.warn("[search.recent] date_sources がないので、行の日付が取れず、一覧は出ない");
+        }
+        if tl.max == 0 {
+            s.info("max = 0 なので、--timeline を指定しない限り一覧は出ない");
+        }
+        match (tl.kinds_only, tl.hits_only) {
+            (true, true) => {}
+            (true, false) => s.info("hits_only = false: 語に当たっていない行も、種類があれば一覧に出す"),
+            (false, true) => s.info("kinds_only = false: 語に当たった日付の取れる行をすべて一覧に出す"),
+            (false, false) => s.info("kinds_only = false・hits_only = false: 返した範囲の日付の取れる行をすべて一覧に出す"),
+        }
+        // パターンに当たる行の数と例（バンドル全体。一覧は search が返した範囲の中だけから作る）
+        let count = |hit: &dyn Fn(&crate::bundle::Page, &str) -> bool| {
+            let (mut n, mut example) = (0usize, None);
+            for p in &bundle.pages {
+                for (line, text) in p.body_lines() {
+                    if hit(p, text) {
+                        n += 1;
+                        if example.is_none() {
+                            example = Some(format!("{}:{line}", p.rel));
+                        }
+                    }
+                }
+            }
+            (n, example)
+        };
+        for k in &tl.kinds {
+            let (n, ex) = count(&|_, t: &str| t.contains(k.pattern.as_str()));
+            if n == 0 {
+                s.warn(format!(
+                    "kinds の {}（「{}」）に当たる行がない",
+                    k.name, k.pattern
+                ));
+            } else {
+                s.info(format!(
+                    "kinds の {}（「{}」）に当たる行: {n}（例: {}）",
+                    k.name,
+                    k.pattern,
+                    ex.unwrap_or_default()
+                ));
+            }
+        }
+        for pat in &tl.superseded {
+            let (n, ex) = count(&|_, t: &str| crate::timeline::read_mark(pat, t, None).is_some());
+            let (unread, ex_unread) = count(&|p, t: &str| {
+                pat.contains(crate::timeline::DATE_SLOT)
+                    && crate::timeline::read_mark(pat, t, dates::generated_at(p)) == Some(None)
+            });
+            if n == 0 {
+                s.warn(format!("superseded の「{pat}」に当たる行がない"));
+                continue;
+            }
+            s.info(format!(
+                "superseded の「{pat}」に当たる行: {n}（例: {}）",
+                ex.unwrap_or_default()
+            ));
+            if unread > 0 {
+                s.warn(format!(
+                    "superseded の「{pat}」の {{date}} の部分が日付として読めない行: {unread}（例: {}）。年のない日付はページの generated.at の年で読む",
+                    ex_unread.unwrap_or_default()
+                ));
+            }
+        }
+        report.sections.push(s.0);
+    }
     Ok(())
 }

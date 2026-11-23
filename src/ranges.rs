@@ -125,6 +125,21 @@ impl<'a> Range<'a> {
         v
     }
 
+    /// 範囲の行（ファイル上の行番号, 内容）。節の一部（`partial`）なら、その部分だけ。
+    pub fn body(&self) -> impl Iterator<Item = (usize, &'a str)> + use<'a> {
+        let page: &'a Page = self.page;
+        let ix = page.text_index();
+        let body = page.body();
+        let first = page.body_line();
+        let end = (self.to + 1 - first).min(ix.lines());
+        (self.from - first..end).map(move |i| (first + i, ix.line(body, i)))
+    }
+
+    /// 範囲の行の数。
+    pub fn lines(&self) -> usize {
+        self.to + 1 - self.from
+    }
+
     fn overlaps(&self, o: &Range<'_>) -> bool {
         self.rel == o.rel && self.from <= o.to && o.from <= self.to
     }
