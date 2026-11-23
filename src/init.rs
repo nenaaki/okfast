@@ -540,10 +540,10 @@ fn write_search_ranges(o: &mut String, bundle: &Bundle) {
         let generated = dates::generated_at(p);
         for t in markdown::tables(p.body_lines()) {
             for r in &t.rows {
-                if r.cells.first().is_some_and(|c| {
-                    dates::newest_in(c).is_some()
-                        || generated.is_some_and(|g| dates::month_day(c, g).is_some())
-                }) {
+                if r.cells
+                    .first()
+                    .is_some_and(|c| dates::cell_date(c, generated).is_some())
+                {
                     note(&mut table_rows, format!("{}:{}", p.rel, r.line));
                 }
             }
@@ -612,6 +612,10 @@ fn write_search_ranges(o: &mut String, bundle: &Bundle) {
         o,
         "# skip_footnotes = true  # 脚注の定義の行（[^id]: 出典）を当たりに数えない"
     );
+    let _ = writeln!(
+        o,
+        "# tf = \"count\"   # 行の中の語の出現回数を数える（binary なら 1 行 1 回）。k1 = 1.2・b = 0.5"
+    );
     let _ = writeln!(o);
 
     let mut sources: Vec<String> = Vec::new();
@@ -672,6 +676,10 @@ fn write_search_ranges(o: &mut String, bundle: &Bundle) {
         }
         let _ = writeln!(o, "[search.recent]");
         let _ = writeln!(o, "count        = 4");
+        let _ = writeln!(
+            o,
+            "# pool       = 60   # 新しい記録は、上位の次のこの数の範囲から選ぶ（0 はすべて）"
+        );
         let _ = writeln!(o, "date_sources = {}", toml_list(&sources));
     }
     let _ = writeln!(o);

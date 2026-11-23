@@ -111,6 +111,38 @@ pub fn footnote_def(line: &str) -> Option<(&str, &str)> {
     Some((&rest[..close], &rest[close + 2..]))
 }
 
+/// リンクの行き先 `](...)` の中の文字列（[`strip_link_targets`] が取り除くもの）。
+pub fn link_target_texts(s: &str) -> impl Iterator<Item = &str> {
+    let mut rest = s;
+    std::iter::from_fn(move || {
+        loop {
+            let i = rest.find("](")?;
+            let after = &rest[i + 2..];
+            let mut depth = 1usize;
+            let close = after.char_indices().find_map(|(k, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(k);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            });
+            match close {
+                Some(k) => {
+                    rest = &after[k + 1..];
+                    return Some(&after[..k]);
+                }
+                None => rest = after,
+            }
+        }
+    })
+}
+
 /// リンクの行き先 `](...)` を取り除き、`]` だけを残す（`[表示](行き先)` → `[表示]`）。行き先の中の括弧の
 /// 組は数える。閉じていない `](` はそのまま残す。リンクがなければ借りたまま返す。
 pub fn strip_link_targets(s: &str) -> std::borrow::Cow<'_, str> {
@@ -314,6 +346,9 @@ mod tests {
             "[価格] と [x] の後"
         );
         assert_eq!(strip_link_targets("閉じない](abc"), "閉じない](abc");
+        let t: Vec<&str> =
+            link_target_texts("[価格](/pricing/price.md) と [x](a(b)c) の後 ](閉じない").collect();
+        assert_eq!(t, vec!["/pricing/price.md", "a(b)c"]);
         assert!(matches!(
             strip_link_targets("リンクなし"),
             std::borrow::Cow::Borrowed(_)

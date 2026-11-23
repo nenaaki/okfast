@@ -191,6 +191,17 @@ pub enum SectionScore {
     Max,
 }
 
+/// BM25 の tf（行の中の語の数え方）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TermFrequency {
+    /// 行の中の出現回数（言い換えの語もそれぞれ数えて足す）。効きは `k1` で頭打ちになる。
+    #[default]
+    Count,
+    /// 当たったかどうかだけ（1 行 1 回）。
+    Binary,
+}
+
 /// `search` の節の切り方。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,6 +221,15 @@ pub struct SectionsConfig {
     /// 脚注の定義の行（`[^id]: 出典`）を当たりに数えない（日付の取り出し元としては使う）。
     #[serde(default = "default_true")]
     pub skip_footnotes: bool,
+    /// 行の点（BM25）の tf の数え方。
+    #[serde(default)]
+    pub tf: TermFrequency,
+    /// BM25 の k1（tf の効きの頭打ち。0 なら回数を数えないのと同じ）。
+    #[serde(default = "default_k1")]
+    pub k1: f64,
+    /// BM25 の b（行の長さの補正。0 なら長さによらない、1 なら長さに比例して軽くする）。
+    #[serde(default = "default_b")]
+    pub b: f64,
 }
 
 impl Default for SectionsConfig {
@@ -220,6 +240,9 @@ impl Default for SectionsConfig {
             min_chars: 0,
             score: SectionScore::default(),
             skip_footnotes: true,
+            tf: TermFrequency::default(),
+            k1: default_k1(),
+            b: default_b(),
         }
     }
 }
@@ -237,6 +260,9 @@ pub struct RecentConfig {
     /// `table_row` で、1 列目より先に見る列の名前。
     #[serde(default)]
     pub table_columns: Vec<String>,
+    /// 新しい記録を、関連度の上位の次の何範囲から選ぶか（0 は候補すべて）。
+    #[serde(default = "default_recent_pool")]
+    pub pool: usize,
 }
 
 impl Default for RecentConfig {
@@ -245,6 +271,7 @@ impl Default for RecentConfig {
             count: default_recent_count(),
             date_sources: Vec::new(),
             table_columns: Vec::new(),
+            pool: default_recent_pool(),
         }
     }
 }
@@ -312,6 +339,15 @@ fn default_section_max_lines() -> usize {
 fn default_window() -> usize {
     4
 }
+fn default_recent_pool() -> usize {
+    60
+}
+fn default_k1() -> f64 {
+    1.2
+}
+fn default_b() -> f64 {
+    0.5
+}
 fn default_recent_count() -> usize {
     4
 }
@@ -352,6 +388,16 @@ impl Config {
         }
         for p in &c.search.must_read.pages {
             crate::selector::compile_glob(&p.path)?;
+        }
+        let sc = &c.search.sections;
+        if !(sc.k1.is_finite() && sc.k1 >= 0.0) {
+            return Err(err(format!("[search.sections] k1 は 0 以上（{}）", sc.k1)));
+        }
+        if !(0.0..=1.0).contains(&sc.b) {
+            return Err(err(format!(
+                "[search.sections] b は 0 から 1 まで（{}）",
+                sc.b
+            )));
         }
         Ok(c)
     }

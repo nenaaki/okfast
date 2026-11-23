@@ -1,8 +1,8 @@
 //! 行の日付の取り出し。
 //!
 //! OKF 0.2 には日付をどこに書くかの決まりがないので、どこから取るかは設定（`[search.recent] date_sources`）で
-//! 宣言させる。日付の書式は `YYYY-MM-DD` と `YYYY/MM/DD`（月・日は 1 桁も可）。表のセルに年のない日付
-//! （`M-D`・`M/D`）だけが書かれていれば、ページを書いた日（`generated.at`）の年で読む（[`month_day`]）。
+//! 宣言させる。日付の書式は `YYYY-MM-DD` と `YYYY/MM/DD`（月・日は 1 桁も可）。表のセルは、日付で始まるときだけ
+//! その日付を使い（[`cell_date`]）、年のない日付（`M-D`・`M/D`）はページを書いた日（`generated.at`）の年で読む。
 
 use crate::bundle::Page;
 use crate::markdown::{self, footnote_def};
@@ -18,7 +18,7 @@ pub type LineDates = std::sync::Arc<[Option<Date>]>;
 /// 日付の取り出し元。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DateSource {
-    /// 表のデータ行の 1 列目（と、設定で名前を挙げた列）。年のない日付は `generated.at` の年で読む。
+    /// 表のデータ行の 1 列目（と、設定で名前を挙げた列）。セルが日付で始まるときだけ使う（[`cell_date`]）。
     TableRow,
     /// frontmatter のキー（ページの全行に効く）。
     Frontmatter(String),
@@ -140,16 +140,45 @@ pub fn generated_at(page: &Page) -> Option<Date> {
     date_at(s.trim().as_bytes()).map(|(d, _)| d)
 }
 
-/// 文字列全体が年のない日付（`M-D`・`M/D`。月・日は 1〜2 桁）なら、`base`（ページを書いた日）の年で読む。
+/// 表のセルの日付。セル（前後の空白を除く）が日付で始まるときだけ、その日付を返す。文の途中の日付
+/// （「第 6 回は 2027/6/14」など、先の予定のことが多い）は使わない。年のない日付（`M-D`・`M/D`）は、
+/// `base`（ページを書いた日）があればその年で読む（[`month_day`]）。
+pub fn cell_date(cell: &str, base: Option<Date>) -> Option<Date> {
+    let t = cell.trim();
+    date_at(t.as_bytes())
+        .map(|(d, _)| d)
+        .or_else(|| base.and_then(|b| month_day(t, b)))
+}
+
+/// 文字列（前後の空白を除く）が年のない日付（`M-D`・`M/D`。月・日は 1〜2 桁）で始まるなら、`base`（ページを
+/// 書いた日）の年で読む。日付のすぐ後ろが数字・`-`・`/`・`.`・`:` なら日付としない（`1-2-3`・`10:30` など）。
 /// 月が `base` の月より 6 か月を超えて先なら、前の年の話とみなす（1 月に書いたページの「12-20」は前年）。
 pub fn month_day(s: &str, base: Date) -> Option<Date> {
     let b = s.trim().as_bytes();
-    let num = |p: &[u8]| -> Option<u32> {
-        (!p.is_empty() && p.len() <= 2 && p.iter().all(u8::is_ascii_digit))
-            .then(|| p.iter().fold(0, |v, &c| v * 10 + u32::from(c - b'0')))
+    let digits = |from: usize| -> (u32, usize) {
+        let n = b[from.min(b.len())..]
+            .iter()
+            .take(3)
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        let v = b[from..from + n]
+            .iter()
+            .fold(0, |v, &c| v * 10 + u32::from(c - b'0'));
+        (v, n)
     };
-    let sep = b.iter().position(|&c| c == b'-' || c == b'/')?;
-    let (month, day) = (num(&b[..sep])?, num(&b[sep + 1..])?);
+    let (month, mn) = digits(0);
+    if !(1..=2).contains(&mn) || !matches!(b.get(mn), Some(b'-' | b'/')) {
+        return None;
+    }
+    let (day, dn) = digits(mn + 1);
+    if !(1..=2).contains(&dn) {
+        return None;
+    }
+    if b.get(mn + 1 + dn)
+        .is_some_and(|c| c.is_ascii_digit() || matches!(c, b'-' | b'/' | b'.' | b':'))
+    {
+        return None;
+    }
     let mut year = base / 10000;
     if month > base / 100 % 100 + 6 {
         year -= 1;
@@ -188,13 +217,10 @@ pub fn line_dates(
                         if out[row.line].is_some() {
                             continue;
                         }
-                        out[row.line] =
-                            cols.iter()
-                                .filter_map(|&c| row.cells.get(c))
-                                .find_map(|cell| {
-                                    newest_in(cell)
-                                        .or_else(|| base.and_then(|b| month_day(cell, b)))
-                                });
+                        out[row.line] = cols
+                            .iter()
+                            .filter_map(|&c| row.cells.get(c))
+                            .find_map(|cell| cell_date(cell, base));
                     }
                 }
             }
@@ -381,9 +407,33 @@ mod tests {
         assert_eq!(month_day("8/1", 20270110), Some(20260801));
         assert_eq!(month_day("2-29", 20261123), None);
         assert_eq!(month_day("2-29", 20241123), Some(20240229));
-        for s in ["13-01", "1-2-3", "123-4", "4-", "a-1", "1.5", "2026-04-08"] {
+        for s in [
+            "13-01",
+            "1-2-3",
+            "123-4",
+            "4-",
+            "a-1",
+            "1.5",
+            "2026-04-08",
+            "10:30",
+            "1/2/3",
+            "4-100",
+        ] {
             assert_eq!(month_day(s, 20261123), None, "{s}");
         }
+        assert_eq!(month_day("11/20（木）", 20261123), Some(20261120));
+        assert_eq!(month_day("11-20 定例", 20261123), Some(20261120));
+
+        // セルは日付で始まるときだけ。文の途中の日付（先の予定）は使わない
+        assert_eq!(cell_date("2026-03-02", None), Some(20260302));
+        assert_eq!(cell_date(" 2026/3/2（月）", None), Some(20260302));
+        assert_eq!(
+            cell_date("2026-03-02 → 2027-01-01 に延期", None),
+            Some(20260302)
+        );
+        assert_eq!(cell_date("第 6 回は 2027/6/14", None), None);
+        assert_eq!(cell_date("11/20", None), None);
+        assert_eq!(cell_date("11/20", Some(20261123)), Some(20261120));
 
         let text = "---\ntype: Log\ngenerated: { by: human:someone, at: 2027-01-10T09:00:00Z }\n---\n\
 | 日 | 内容 |\n\
@@ -391,12 +441,14 @@ mod tests {
 | 12-20 | 前年の話 |\n\
 | 01-05 | 今年の話 |\n\
 | 2026-03-02 | 年あり |\n\
-| 1 月 5 日 | 読まない |\n";
+| 1 月 5 日 | 読まない |\n\
+| 予定は 2027-06-14 | 読まない |\n";
         let d = page_dates(text, &[DateSource::TableRow], &[]);
         assert_eq!(d[2], Some(20261220));
         assert_eq!(d[3], Some(20270105));
         assert_eq!(d[4], Some(20260302));
         assert_eq!(d[5], None);
+        assert_eq!(d[6], None);
         // generated.at がなければ年のない日付は読まない
         let d = page_dates(
             "---\ntype: Log\n---\n| 日 | 内容 |\n|---|---|\n| 12-20 | 話 |\n",
