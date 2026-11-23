@@ -11,6 +11,8 @@ OKF バンドルの中を探すときは、Grep ツールや `rg`・`grep` で�
 - 全角半角・大文字小文字・空白の違いを無視して当てる
 - 常駐プロセスが全ページをメモリに持っているので、ripgrep より速い（初回だけ少し遅い）
 
+okfast の MCP ツール（`mcp__okfast__grep`・`mcp__okfast__aliases`）が使えるなら、シェルの `okfast` コマンドより先にそちらを使う（シェルを通さないぶん速い）。引数は下のオプションと同じ名前（`terms` に語の配列、`pages`・`context`・`max_per_page` など）で、出力も同じ。
+
 ## 使い方
 
 ```sh
@@ -25,6 +27,8 @@ okfast -b <root> grep -c 語              # ページごとの行数だけ（順
 okfast -b <root> grep --all 語           # 既定で除いているページ（辞書のページなど）も含める
 okfast -b <root> aliases 語              # 何に言い換えられるかだけを見る（出所のページと行つき）
 ```
+
+`--json`（1 行の JSON）はプログラム・試験用。読むのには使わない。
 
 - `<root>` はバンドルの root（`okfast.toml` や層のディレクトリがあるところ）。今いるディレクトリが root なら `-b` は省ける
 - 出力のパスは root からの相対パス。中身を読むときは `<root>/<パス>` を Read する

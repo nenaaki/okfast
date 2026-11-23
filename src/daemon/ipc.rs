@@ -53,10 +53,16 @@ mod windows {
     /// 接続。
     pub type Conn = File;
 
-    /// 接続口の名前（`OKFAST_DAEMON_ENDPOINT` で変えられる。試験用）。
+    /// 接続口の名前（`OKFAST_DAEMON_ENDPOINT` で変えられる。試験用）。やりとりの形式の版を含めるので、
+    /// 形式の違う okfast は別の常駐プロセスを使う（互いに相手の問い合わせを読めず、接続口を奪い合わない）。
     pub fn endpoint() -> String {
-        super::override_endpoint()
-            .unwrap_or_else(|| format!(r"\\.\pipe\okfast-{}", super::user_tag()))
+        super::override_endpoint().unwrap_or_else(|| {
+            format!(
+                r"\\.\pipe\okfast-v{}-{}",
+                crate::daemon::protocol::VERSION,
+                super::user_tag()
+            )
+        })
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -227,10 +233,15 @@ mod unix {
         }
     }
 
-    /// 接続口のパス（`OKFAST_DAEMON_ENDPOINT` で変えられる。試験用）。
+    /// 接続口のパス（`OKFAST_DAEMON_ENDPOINT` で変えられる。試験用）。やりとりの形式の版を含めるので、
+    /// 形式の違う okfast は別の常駐プロセスを使う。
     pub fn endpoint() -> String {
-        super::override_endpoint()
-            .unwrap_or_else(|| dir().join("daemon.sock").to_string_lossy().into_owned())
+        super::override_endpoint().unwrap_or_else(|| {
+            dir()
+                .join(format!("daemon-v{}.sock", crate::daemon::protocol::VERSION))
+                .to_string_lossy()
+                .into_owned()
+        })
     }
 
     /// 待ち受け。

@@ -78,10 +78,12 @@ okfast -b <root> grep --all ウィジェットプロ             # 設定の exc
 okfast -b <root> grep -c WP / grep -l WP              # ページごとの行数だけ / パスだけを出す（順位順）
 okfast -b <root> grep -C 2 -m 20 WP                   # 前後 2 行つき、1 ページ 20 行まで
 okfast -b <root> grep --full WP                       # 上限なしですべて出す
+okfast -b <root> grep --json WP                       # 1 行の JSON で出す（プログラム・試験用）
 okfast -b <root> aliases "Widget Pro" [--json]        # 何に言い換えられるかだけを表示する
 okfast -b <root> config init > okfast.toml           # バンドルを走査して設定の下書きを作る
 okfast -b <root> config check                        # 設定をバンドルに当てて確かめる（警告なしで終了コード 0）
 okfast config reference                              # 設定の書式の説明
+okfast -b <root> mcp                                 # MCP サーバーとして動く（下の「MCP サーバー」）
 ```
 
 出力は、AI が 1 回の呼び出しで次に読むページを決められる形にしています。
@@ -93,6 +95,21 @@ okfast config reference                              # 設定の書式の説明
 - 先頭の `#` 行に、言い換えの内容とその出所（`glossary/別名表.md:12` のようなページと行）、主題のページ、件数が出ます
 - 終了コードは、当たりありが 0、当たりなしが 1、エラーが 2 です
 
+### JSON の出力
+
+`grep --json` は、結果を 1 行の JSON で出します。検索だけの試験（順位・行番号の比べ合わせ）や、ほかのプログラムから使うためのものです。
+
+```json
+{"terms":[{"term":"Widget","added":["WP"],"conditional":[{"when":"path=references/**","names":["ウィジェト"]}],"boost":["notes/widget.md"],"lines":12}],
+ "total_lines":12,"total_pages":3,"searched":40,"excluded":2,"exclude":["glossary/**"],
+ "pages":[{"rank":1,"path":"notes/widget.md","title":"Widget Pro","lines":8,"terms":1,"title_hit":true,"heading_hits":1,"boosted":true,
+           "hits":[{"line":5,"text":"WP の価格は…"}]}]}
+```
+
+- `pages` は当たったページを順位順にすべて並べます。`hits`（当たった行）は、上位 `--max-pages` ページに 1 ページ `-m` 行まで付けます（`lines` は省く前の行数）。行は `--max-columns` で切ります。`--full` で全部
+- `terms[].lines` は語ごとの当たった行の数、`terms` はそのページで当たった語の種類の数、`boosted` は主題のページ
+- `-C`・`-c`・`-l`・`--pages` とは一緒に使えません。`--max-chars` は使いません
+
 ### 常駐プロセス
 
 `grep` と `aliases` は、まず常駐プロセスに問い合わせます。常駐プロセスは、バンドルのページ・正規化済みの本文・同義語の辞書をすべてメモリに持ち、ファイルの変更を OS の通知で監視しています。いなければその回は自分で実行し、常駐プロセスを裏で起動します（次の回から速くなります）。
@@ -101,7 +118,7 @@ okfast config reference                              # 設定の書式の説明
 - 本文の合計が上限（既定 256 MiB、`OKFAST_DAEMON_MAX_MB`）を超えるバンドルは扱わず、自分で実行します
 - しばらく使われなければ終わります（既定 30 分、`OKFAST_DAEMON_IDLE_SECS`）
 - 答えが上限（既定 30 秒、`OKFAST_DAEMON_TIMEOUT_SECS`）までに来なければ、その回は自分で実行し、固まった常駐プロセスを終わらせます（次の回に起動し直します）
-- 接続口は、Windows では所有者だけが接続できる名前付きパイプ、Linux では `$XDG_RUNTIME_DIR/okfast/daemon.sock`（0700 のディレクトリの中）です。ポートは開けません
+- 接続口は、Windows では所有者だけが接続できる名前付きパイプ、Linux では `$XDG_RUNTIME_DIR/okfast/daemon-v<形式の版>.sock`（0700 のディレクトリの中）です。ポートは開けません。名前にやりとりの形式の版を含めるので、形式の違う版の okfast が同時に使われても、それぞれ別の常駐プロセスを使います
 - 実行ファイルを作り直すと、次の問い合わせで常駐プロセスを入れ替えます。Windows では実行中のファイルを上書きできないため、`%LOCALAPPDATA%\okfast\daemon\` に置いた複製を動かします
 - `--no-daemon`（または `OKFAST_DAEMON=0`）で使わない。`okfast daemon status | stop | start` で状態を見る・終わらせる・先に起動する。`--stats` で常駐プロセスで実行したかと時間が出ます
 - WSL から `/mnt/c` の下のファイルを扱う使い方は対象外です（変更の通知が届かず、読み込みも遅い）
@@ -124,9 +141,30 @@ OKF 0.2 には同義語の決まりがない（type も frontmatter のキーも
 
 書式の説明は [docs/config.md](docs/config.md)（`okfast config reference` でも表示）、設定例は [examples/glossary-table.okfast.toml](examples/glossary-table.okfast.toml) にあります。
 
+### MCP サーバー
+
+`okfast -b <root> mcp` で、標準入出力の MCP サーバーとして動きます。AI のクライアント（Claude Code など）は、`grep` と `aliases` をツールとして直接呼べます。
+
+- シェルを通さないので、呼び出しのたびのシェルの起動・フック・許可の確認がかかりません（Windows では 1 回あたり数秒になることがあります）
+- Bash を持たないエージェント（Read・Grep・Glob だけのものなど）にも、ツールとして渡せます
+- ツールの引数は CLI のオプションと同じ名前です（`terms`、`pages`、`files`、`count`、`json`、`context`、`max_per_page`、`max_pages`、`max_columns`、`max_chars`、`full`、`all`、`no_aliases`）。出力も CLI と同じです
+- 検索は CLI と同じく常駐プロセスを使います（`--no-daemon` を付ければ使いません）。ファイルの変更はすぐに反映します
+
+Claude Code では、バンドルを持つリポジトリの `.mcp.json` に書きます（`okfast` に PATH が通っていなければ、実行ファイルのパスを書きます）。
+
+```json
+{
+  "mcpServers": {
+    "okfast": { "command": "okfast", "args": ["-b", "knowledge", "mcp"] }
+  }
+}
+```
+
+ツールは `mcp__okfast__grep`・`mcp__okfast__aliases` という名前になります。確認なしで使わせるには、`.claude/settings.json` の `permissions.allow` に `"mcp__okfast"` を足します。
+
 ### AI に使わせる（Grep より優先させる）
 
-Claude Code は、何も言わなければ Grep ツール（中身は ripgrep）でファイルを探します。okfast を優先させるには、バンドルを持つリポジトリで次の 3 つを行います。
+Claude Code は、何も言わなければ Grep ツール（中身は ripgrep）でファイルを探します。okfast を優先させるには、バンドルを持つリポジトリで次の 3 つを行います。MCP サーバーを使う場合は、2 の「`okfast -b knowledge grep`」を「okfast の MCP ツール（`mcp__okfast__grep`）」に読み替え、3 は上の `mcp__okfast` の許可にします。
 
 **1. スキルを置く**
 
@@ -179,6 +217,7 @@ src/init.rs         設定の下書き（okfast config init）
 src/textindex.rs    検索用に正規化した本文（ページごとに 1 回だけ作る）
 src/search.rs       行単位の検索（memmem / Teddy で当たりそうな行を探し、その行だけ全部の語を確かめる）
 src/command.rs      grep・aliases の実行と出力（CLI と常駐プロセスで共有）
+src/mcp.rs          MCP サーバー（標準入出力の JSON-RPC。ツールは grep・aliases）
 src/daemon/         常駐プロセス（mod.rs: 起動と問い合わせ、state.rs: メモリ上の状態と監視、ipc.rs: 接続口、protocol.rs: 形式）
 src/main.rs         CLI
 examples/           設定例・段階ごとの時間計測（timing.rs）

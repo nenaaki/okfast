@@ -32,13 +32,13 @@ cargo build --profile profiling   # release 最適化 + デバッグシンボル
 
 - モジュールの役割は README の「ディレクトリ構成」。同義語の設定の書式の正本は `docs/config.md`（バイナリに埋め込んで `okfast config reference` で出す）
 - 設定のキーを足す・変えるときは、`docs/config.md`・`check.rs`（診断）・`init.rs`（下書き）・`skills/okfast-config/SKILL.md` もそろえる。`tests/config_tools.rs` の `reference_documents_every_key` に新しいキーを足す
-- grep・aliases のオプションや出力を変えるときは、`skills/okfast-search/SKILL.md` と README の「AI に使わせる」もそろえる
+- grep・aliases のオプションや出力を変えるときは、`skills/okfast-search/SKILL.md` と README の「AI に使わせる」もそろえる。MCP のツールの引数（`src/mcp.rs` の `tools` と `grep_options`）も CLI のオプションと同じ名前でそろえ、`tests/mcp.rs` で CLI と同じ出力になることを確かめる
 - **リポジトリ（コード・コメント・テスト・ドキュメント・設定例）に、実在のプロジェクト名・顧客名・そのデータ由来の語を書かない。** 例は架空のもの（Widget Pro など）にする。実データでの確認はローカルだけで行う
 - 設定例は `examples/glossary-table.okfast.toml`
 - 段階ごとの時間: `cargo run --release --example timing -- <bundle> <config> <語>...`（キャッシュなし・初回・2 回目の読み込みと検索）。CLI では `--stats`
 - 計測は PowerShell から行う（Git Bash から起動すると 1 回あたり 100ms 以上上乗せされる）。Windows のプロセス起動は揺れが大きいので、CLI 全体の時間より timing の内訳で比べる
 - キャッシュの形式を変えたら `cache.rs` の `VERSION` を上げる
-- 常駐プロセスとのやりとりの形式を変えたら `daemon/protocol.rs` の `VERSION` を上げる。常駐プロセスで実行できるコマンドを足すときは `command.rs` に置き、CLI と常駐プロセスで同じ出力にする（`tests/daemon.rs` で `--no-daemon` と比べる）
+- 常駐プロセスとのやりとりの形式を変えたら `daemon/protocol.rs` の `VERSION` を上げる（接続口の名前に入るので、古い版の常駐プロセスとは別になる）。常駐プロセスで実行できるコマンドを足すときは `command.rs` に置き、CLI と常駐プロセスで同じ出力にする（`tests/daemon.rs` で `--no-daemon` と比べる）
 - 計測で CLI 全体の時間を比べるときは、常駐あり・なし（`--no-daemon`）を分けて書く。実データでの比較相手は ripgrep（Claude Code の Grep ツールの中身）
 - 試験は `OKFAST_DAEMON_ENDPOINT` と `OKFAST_CACHE_DIR` で、利用者の常駐プロセス・キャッシュと分ける
 - WSL では `/mnt/c` の下のバンドルは対象外（変更の通知が届かない）。WSL 用のバイナリは Windows から `cargo build --release --target x86_64-unknown-linux-musl --config 'target.x86_64-unknown-linux-musl.linker="rust-lld"'` で作る（WSL に C コンパイラがないため）

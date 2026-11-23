@@ -56,6 +56,9 @@ enum Command {
         /// 当たったページをすべて、1 ページ 1 行（題名・行数・いちばん上の当たり行の抜粋）で出す。
         #[arg(long, conflicts_with = "count")]
         pages: bool,
+        /// 結果を 1 行の JSON で出す（順位順の全ページと、上位ページの当たった行。プログラム・試験用）。
+        #[arg(long, conflicts_with_all = ["count", "files", "pages", "context"])]
+        json: bool,
         /// 1 ページに出す当たった行の数（0 は無制限）。
         #[arg(short = 'm', long, default_value_t = command::GrepOptions::MAX_PER_PAGE)]
         max_per_page: usize,
@@ -89,6 +92,9 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// MCP サーバーとして動く（標準入出力。AI のクライアントが grep・aliases をツールとして直接呼ぶ）。
+    /// 検索は grep と同じく常駐プロセスを使う。
+    Mcp,
     /// 常駐プロセス（すべてをメモリに持ち、ファイルの変更を監視して答える）を操作する。
     /// grep と aliases は自動で常駐プロセスを使う。
     Daemon {
@@ -218,6 +224,7 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
     let cmd = match &cli.command {
         Command::Config { action } => return run_config(&cli, action),
         Command::Daemon { action } => return run_daemon(&cli, action),
+        Command::Mcp => return run_mcp(&cli),
         Command::Aliases { terms, json } => command::Command::Aliases {
             terms: terms.clone(),
             json: *json,
@@ -229,6 +236,7 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
             count,
             files,
             pages,
+            json,
             max_per_page,
             max_pages,
             context,
@@ -243,6 +251,7 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
                 count: *count,
                 files: *files,
                 pages: *pages,
+                json: *json,
                 max_per_page: if *full { 0 } else { *max_per_page },
                 max_pages: if *full { 0 } else { *max_pages },
                 context: *context,
@@ -252,20 +261,27 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
         },
     };
 
+    let (code, stdout, stderr) = execute(&cli, &cmd)?;
+    let _ = std::io::stdout().lock().write_all(&stdout);
+    let _ = std::io::stderr().lock().write_all(&stderr);
+    Ok(ExitCode::from(code))
+}
+
+/// grep・aliases を実行して、終了コード・標準出力・標準エラーを返す。常駐プロセスを使えればそれで、
+/// 使えなければこのプロセスで読み込んで実行する。
+fn execute(cli: &Cli, cmd: &command::Command) -> okfast::Result<(u8, Vec<u8>, Vec<u8>)> {
     if !cli.no_daemon && daemon::enabled() {
         let started = std::time::Instant::now();
-        match daemon::run(&cli.bundle, cli.config.as_deref(), cli.stats, &cmd) {
+        match daemon::run(&cli.bundle, cli.config.as_deref(), cli.stats, cmd) {
             daemon::Outcome::Done {
                 code,
                 stdout,
-                stderr,
+                mut stderr,
             } => {
-                let _ = std::io::stdout().lock().write_all(&stdout);
-                let _ = std::io::stderr().lock().write_all(&stderr);
                 if cli.stats {
-                    eprintln!("okfast: 問い合わせ全体 {:?}", started.elapsed());
+                    let _ = writeln!(stderr, "okfast: 問い合わせ全体 {:?}", started.elapsed());
                 }
-                return Ok(ExitCode::from(code));
+                return Ok((code, stdout, stderr));
             }
             daemon::Outcome::Unavailable(why) => {
                 if cli.stats {
@@ -276,7 +292,7 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
     }
 
     let (config, config_path) = Config::discover(&cli.bundle, cli.config.as_deref())?;
-    let bundle = load_bundle(&cli)?;
+    let bundle = load_bundle(cli)?;
     let dict = Dictionary::build(&bundle, &config.aliases)?;
     let cx = command::Context {
         bundle: &bundle,
@@ -284,11 +300,36 @@ fn run(cli: Cli) -> okfast::Result<ExitCode> {
         config: &config,
         has_config: config_path.is_some(),
     };
-    let stdout = std::io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
-    let code = command::run(&cmd, &cx, &mut out)?;
-    let _ = out.flush();
-    Ok(ExitCode::from(code))
+    let mut out = Vec::new();
+    let code = command::run(cmd, &cx, &mut out)?;
+    Ok((code, out, Vec::new()))
+}
+
+/// MCP サーバーとして、標準入力が閉じるまで答える。
+fn run_mcp(cli: &Cli) -> okfast::Result<ExitCode> {
+    let root = std::fs::canonicalize(&cli.bundle).map_err(|e| okfast::Error::Io {
+        path: cli.bundle.clone(),
+        source: e,
+    })?;
+    let shown = root.display().to_string();
+    // Windows の \\?\ の前置きは読みにくいので外す
+    let shown = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_string();
+    let mut run = |cmd: &command::Command| -> okfast::Result<(u8, String)> {
+        let (code, stdout, stderr) = execute(cli, cmd)?;
+        let mut text = String::from_utf8_lossy(&stdout).into_owned();
+        if code >= 2 || !stderr.is_empty() {
+            text.push_str(&String::from_utf8_lossy(&stderr));
+        }
+        Ok((code, text))
+    };
+    let stdin = std::io::stdin();
+    okfast::mcp::serve(stdin.lock(), std::io::stdout().lock(), &shown, &mut run).map_err(|e| {
+        okfast::Error::Io {
+            path: PathBuf::from("<stdio>"),
+            source: e,
+        }
+    })?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_daemon(cli: &Cli, action: &DaemonAction) -> okfast::Result<ExitCode> {

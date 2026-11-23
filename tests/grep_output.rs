@@ -255,3 +255,43 @@ fn pages_mode_lists_every_page_in_one_line() {
     assert_eq!(shown + rest.split(", ").count(), 40, "{out}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn json_lists_every_page_in_rank_order_with_limited_lines() {
+    let many = "alpha\n".repeat(8);
+    let root = bundle_dir(
+        "json",
+        &[
+            ("a/many.md", &page("Many", &many)),
+            ("b/both.md", &page("Both", "alpha\nbeta \"q\"\n")),
+            ("c/one.md", &page("One", "alpha\n")),
+        ],
+    );
+    let opts = GrepOptions {
+        json: true,
+        max_per_page: 2,
+        max_pages: 2,
+        ..GrepOptions::default()
+    };
+    let (code, out) = grep(&root, &["alpha", "beta"], opts);
+    assert_eq!(code, 0);
+    assert_eq!(out.lines().count(), 1, "1 行の JSON: {out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["total_pages"], 3);
+    assert_eq!(v["total_lines"], 11);
+    assert_eq!(v["terms"][0]["term"], "alpha");
+    assert_eq!(v["terms"][1]["lines"], 1);
+    let pages = v["pages"].as_array().unwrap();
+    let order: Vec<&str> = pages.iter().map(|p| p["path"].as_str().unwrap()).collect();
+    assert_eq!(order, ["b/both.md", "a/many.md", "c/one.md"]);
+    assert_eq!(pages[0]["rank"], 1);
+    assert_eq!(pages[0]["terms"], 2);
+    assert_eq!(pages[0]["title"], "Both");
+    assert_eq!(pages[0]["hits"][1]["text"], "beta \"q\"");
+    // 2 ページ目は 8 行のうち 2 行、3 ページ目は行なし（lines は省く前の数）
+    assert_eq!(pages[1]["lines"], 8);
+    assert_eq!(pages[1]["hits"].as_array().unwrap().len(), 2);
+    assert_eq!(pages[1]["hits"][0]["line"], 5);
+    assert_eq!(pages[2]["hits"].as_array().unwrap().len(), 0);
+    let _ = std::fs::remove_dir_all(&root);
+}
