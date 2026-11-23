@@ -4,7 +4,7 @@
 
 okfast は OKF 0.2 形式のデータを、読み込み・検証・変換・書き出しまで可能な限り高速に処理することを目的としたライブラリ兼 CLI です。
 
-> ステータス: 開発初期。実装済みは同義語による言い換えつきの検索（`okfast grep` / `okfast aliases`）と、その設定を作る・確かめる道具（`okfast config`）。API は予告なく変わります。
+> ステータス: 開発初期。実装済みは、同義語による言い換えつきの検索（`okfast grep` / `okfast aliases`）、それを速く答える常駐プロセス、AI のクライアントから直接呼べる MCP サーバー（`okfast mcp`）、検索の設定を作る・確かめる道具（`okfast config`）。API は予告なく変わります。
 
 ## 目標
 
@@ -30,6 +30,8 @@ okfast --version
 ```
 
 展開したフォルダの `skills/` に、Claude Code 用のスキルが入っています（[AI に使わせる](#ai-に使わせるgrep-より優先させる) を参照）。`SHA256SUMS.txt` でファイルを確かめられます。
+
+更新するときは、新しい実行ファイルで置き換えるだけです。常駐プロセスは次の問い合わせで新しい版に入れ替わります。
 
 ソースから入れる場合は `cargo install --git https://github.com/nenaaki/okfast`（Rust 1.85 以上）。
 
@@ -160,7 +162,16 @@ Claude Code では、バンドルを持つリポジトリの `.mcp.json` に書�
 }
 ```
 
-ツールは `mcp__okfast__grep`・`mcp__okfast__aliases` という名前になります。確認なしで使わせるには、`.claude/settings.json` の `permissions.allow` に `"mcp__okfast"` を足します。
+ツールは `mcp__okfast__grep`・`mcp__okfast__aliases` という名前になります。`.claude/settings.json` に次のように書くと、確認なしで使わせられ、`.mcp.json` のサーバーを使うかの確認も出ません。
+
+```json
+{
+  "permissions": { "allow": ["mcp__okfast"] },
+  "enabledMcpjsonServers": ["okfast"]
+}
+```
+
+- MCP サーバーは会話のあいだ動き続けます。Windows では動いている実行ファイルを置き換えられないので、会話中に okfast を更新する仕組みがあるなら、実行ファイルの複製を MCP サーバーとして動かします（常駐プロセスは自分で複製から動くので、気にしなくてよい）
 
 ### AI に使わせる（Grep より優先させる）
 
